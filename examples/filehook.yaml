@@ -1,0 +1,42 @@
+version: 1
+
+watch:
+  paths:
+    - ./input
+  ignore:
+    - "*.tmp"
+    - "*.partial"
+    - ".git"
+  debounce_ms: 200
+
+inputs:
+  patterns:
+    - "*.txt"
+    - "*.md"
+
+outputs:
+  root: ./output
+
+# Command to run for each input file
+# Available variables: {{input}}, {{output}}, {{outputs}}, {{outputs_json}}, {{output_dir}}
+command: ["sh", "-c", "cat {{input}} | tr 'a-z' 'A-Z' > {{output}}"]
+
+plugins:
+  filename_generator:
+    path: ./plugins/filename_gen.sh
+    args: []
+  # Optional: custom should_process logic
+  # should_process:
+  #   path: ./plugins/should_process.sh
+  #   args: []
+
+concurrency:
+  mode: parallel    # parallel | sequential_switch
+  max_workers: 2
+
+# Policy when input files are modified after initial processing
+# Options: ignore, reprocess, if-newer, versioned
+on_modified: if-newer
+
+# Where to store queue database and job logs
+state_dir: .filehook
