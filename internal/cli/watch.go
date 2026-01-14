@@ -82,6 +82,13 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	shouldProcess := plugin.NewShouldProcessChecker(cfg)
 	groupKeyGen := plugin.NewGroupKeyGenerator(cfg)
 
+	// Initialize ready checker (optional - nil if not supported)
+	readyChecker, err := plugin.NewReadyChecker(cfg)
+	if err != nil {
+		logger.Printf("Ready checker not available: %v", err)
+		readyChecker = nil
+	}
+
 	// Initialize watcher
 	matcher := watcher.NewMatcher(cfg.Inputs.Patterns, cfg.Watch.Ignore)
 	w, err := watcher.New(matcher, cfg.Watch.DebounceDuration())
@@ -129,7 +136,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 			return nil
 
 		case event := <-w.Events():
-			if err := processEvent(ctx, cfg, store, filenameGen, shouldProcess, groupKeyGen, event, logger); err != nil {
+			if err := processEvent(ctx, cfg, store, filenameGen, shouldProcess, groupKeyGen, readyChecker, event, logger); err != nil {
 				logger.Printf("Error processing %s: %v", event.Path, err)
 			}
 
@@ -146,6 +153,7 @@ func processEvent(
 	filenameGen *plugin.FilenameGenerator,
 	shouldProcess *plugin.ShouldProcessChecker,
 	groupKeyGen *plugin.GroupKeyGenerator,
+	readyChecker *plugin.ReadyChecker,
 	event watcher.Event,
 	logger *log.Logger,
 ) error {
@@ -157,6 +165,18 @@ func processEvent(
 	if exists {
 		logger.Printf("Skipping %s: already queued", event.Path)
 		return nil
+	}
+
+	// Check if file is ready for transformation
+	if readyChecker != nil {
+		ready, err := readyChecker.Check(ctx, event.Path)
+		if err != nil {
+			return fmt.Errorf("ready check failed: %w", err)
+		}
+		if !ready {
+			logger.Printf("Skipping %s: not ready for transformation", event.Path)
+			return nil
+		}
 	}
 
 	// Generate output filenames

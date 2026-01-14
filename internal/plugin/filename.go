@@ -14,6 +14,40 @@ type FilenameGeneratorOutput struct {
 	Outputs []string `json:"outputs"`
 }
 
+// ReadyChecker checks whether a file is ready for transformation using the naming tool
+type ReadyChecker struct {
+	runner *Runner
+}
+
+// NewReadyChecker creates a new ready checker using the naming tool
+func NewReadyChecker(cfg *config.Config) (*ReadyChecker, error) {
+	if cfg.Plugins.FilenameGenerator == nil {
+		return nil, fmt.Errorf("filename_generator plugin not configured")
+	}
+
+	pluginPath := cfg.ResolvePath(cfg.Plugins.FilenameGenerator.Path)
+
+	// The ready command uses the same plugin path but with "ready" as the first arg
+	return &ReadyChecker{
+		runner: NewRunner(pluginPath, []string{"ready"}, cfg.ConfigDir),
+	}, nil
+}
+
+// Check returns true if the file is ready for transformation
+func (rc *ReadyChecker) Check(ctx context.Context, inputPath string) (bool, error) {
+	result, err := rc.runner.Run(ctx, inputPath)
+	if err != nil {
+		return false, fmt.Errorf("ready check failed: %w", err)
+	}
+
+	if result.ExitCode != 0 {
+		return false, fmt.Errorf("ready check failed with exit code %d: %s", result.ExitCode, result.Stderr)
+	}
+
+	output := trimNewline(result.Stdout)
+	return output == "true", nil
+}
+
 // FilenameGenerator wraps the filename generator plugin
 type FilenameGenerator struct {
 	runner     *Runner

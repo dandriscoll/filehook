@@ -82,6 +82,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 	shouldProcess := plugin.NewShouldProcessChecker(cfg)
 	groupKeyGen := plugin.NewGroupKeyGenerator(cfg)
 
+	// Initialize ready checker (optional - nil if not supported)
+	readyChecker, err := plugin.NewReadyChecker(cfg)
+	if err != nil {
+		logger.Printf("Ready checker not available: %v", err)
+		readyChecker = nil
+	}
+
 	// Create matcher for scanning
 	matcher := watcher.NewMatcher(cfg.Inputs.Patterns, cfg.Watch.Ignore)
 
@@ -100,7 +107,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	go func() {
 		defer close(eventsDone)
 		for event := range w.Events() {
-			if err := processEvent(ctx, cfg, store, filenameGen, shouldProcess, groupKeyGen, event, logger); err != nil {
+			if err := processEvent(ctx, cfg, store, filenameGen, shouldProcess, groupKeyGen, readyChecker, event, logger); err != nil {
 				logger.Printf("Error processing %s: %v", event.Path, err)
 			}
 		}
