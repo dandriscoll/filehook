@@ -24,7 +24,19 @@ type ShouldProcessOutput struct {
 	Reason  string `json:"reason,omitempty"`
 }
 
-// ShouldProcessChecker wraps the should_process plugin
+// ShouldProcessChecker determines whether to process a file based on modification policy.
+//
+// IMPORTANT: This is NOT for checking file readiness. For readiness checks, use the
+// naming plugin (via ReadyChecker). The distinction is:
+//
+//   - ReadyChecker (naming plugin): "Is the external source ready for transformation?"
+//     Example: Is the upstream system done writing the file?
+//
+//   - ShouldProcessChecker: "Given our policy, should we process this file?"
+//     Example: Does the output already exist? Is the input newer than outputs?
+//
+// ShouldProcessChecker considers timestamps, output existence, and modification policy
+// (ignore, reprocess, if-newer, versioned) to decide whether processing is needed.
 type ShouldProcessChecker struct {
 	runner *Runner
 	policy config.ModifiedPolicy

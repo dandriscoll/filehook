@@ -81,9 +81,10 @@ func printConfigJSON(cfg *config.Config) error {
 }
 
 type pluginsOutput struct {
-	FilenameGenerator *pluginOutput `json:"filename_generator,omitempty"`
-	ShouldProcess     *pluginOutput `json:"should_process,omitempty"`
-	GroupKey          *pluginOutput `json:"group_key,omitempty"`
+	// Naming handles both filename generation AND ready checks
+	Naming        *pluginOutput `json:"naming,omitempty"`
+	ShouldProcess *pluginOutput `json:"should_process,omitempty"`
+	GroupKey      *pluginOutput `json:"group_key,omitempty"`
 }
 
 type pluginOutput struct {
@@ -94,11 +95,11 @@ type pluginOutput struct {
 
 func formatPlugins(cfg *config.Config) pluginsOutput {
 	out := pluginsOutput{}
-	if cfg.Plugins.FilenameGenerator != nil {
-		out.FilenameGenerator = &pluginOutput{
-			Path:         cfg.Plugins.FilenameGenerator.Path,
-			ResolvedPath: cfg.ResolvePath(cfg.Plugins.FilenameGenerator.Path),
-			Args:         cfg.Plugins.FilenameGenerator.Args,
+	if cfg.Plugins.Naming != nil {
+		out.Naming = &pluginOutput{
+			Path:         cfg.Plugins.Naming.Path,
+			ResolvedPath: cfg.ResolvePath(cfg.Plugins.Naming.Path),
+			Args:         cfg.Plugins.Naming.Args,
 		}
 	}
 	if cfg.Plugins.ShouldProcess != nil {
@@ -155,8 +156,8 @@ func printConfigHuman(cfg *config.Config) error {
 	fmt.Printf("  Output root: %s\n", cfg.OutputRoot())
 	fmt.Printf("  State dir:   %s\n", cfg.StateDirectory())
 
-	if cfg.Plugins.FilenameGenerator != nil {
-		fmt.Printf("  Filename generator: %s\n", cfg.ResolvePath(cfg.Plugins.FilenameGenerator.Path))
+	if cfg.Plugins.Naming != nil {
+		fmt.Printf("  Naming plugin: %s\n", cfg.ResolvePath(cfg.Plugins.Naming.Path))
 	}
 	if cfg.Plugins.ShouldProcess != nil {
 		fmt.Printf("  Should process: %s\n", cfg.ResolvePath(cfg.Plugins.ShouldProcess.Path))

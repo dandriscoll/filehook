@@ -16,6 +16,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var watchPattern string
+
 var watchCmd = &cobra.Command{
 	Use:   "watch",
 	Short: "Start watcher and workers",
@@ -24,6 +26,7 @@ var watchCmd = &cobra.Command{
 }
 
 func init() {
+	watchCmd.Flags().StringVarP(&watchPattern, "pattern", "p", "", "only process files matching the named pattern")
 	rootCmd.AddCommand(watchCmd)
 }
 
@@ -79,23 +82,16 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Initialize plugins
-	filenameGen, err := plugin.NewFilenameGenerator(cfg)
+	namingPlugin, err := plugin.NewNamingPlugin(cfg)
 	if err != nil {
-		return fmt.Errorf("failed to initialize filename generator: %w", err)
+		return fmt.Errorf("failed to initialize naming plugin: %w", err)
 	}
 
 	shouldProcess := plugin.NewShouldProcessChecker(cfg)
 	groupKeyGen := plugin.NewGroupKeyGenerator(cfg)
 
-	// Initialize ready checker (optional - nil if not supported)
-	readyChecker, err := plugin.NewReadyChecker(cfg)
-	if err != nil {
-		logger.Printf("Ready checker not available: %v", err)
-		readyChecker = nil
-	}
-
 	// Initialize watcher
-	matcher := watcher.NewMatcher(cfg.Inputs.Patterns, cfg.Watch.Ignore)
+	matcher := watcher.NewMatcherWithFilter(cfg.Inputs.Patterns, cfg.Watch.Ignore, watchPattern)
 	w, err := watcher.New(matcher, cfg.Watch.DebounceDuration())
 	if err != nil {
 		return fmt.Errorf("failed to create watcher: %w", err)
@@ -104,7 +100,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 
 	// Add watch paths (use -d directory if specified, otherwise config's watch paths)
 	for _, path := range getEffectiveWatchPaths(cfg) {
-		logger.Printf("Watching: %s", path)
+		if watchPattern != "" {
+			logger.Printf("Watching: %s (pattern filter: %s)", path, watchPattern)
+		} else {
+			logger.Printf("Watching: %s", path)
+		}
 		if err := w.AddPath(path); err != nil {
 			return fmt.Errorf("failed to add watch path: %w", err)
 		}
@@ -141,7 +141,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 			return nil
 
 		case event := <-w.Events():
-			if err := processEvent(ctx, cfg, store, filenameGen, shouldProcess, groupKeyGen, readyChecker, event, logger); err != nil {
+			if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger); err != nil {
 				logger.Printf("Error processing %s: %v", event.Path, err)
 			}
 
@@ -155,10 +155,9 @@ func processEvent(
 	ctx context.Context,
 	cfg *config.Config,
 	store queue.Store,
-	filenameGen *plugin.FilenameGenerator,
+	namingPlugin *plugin.NamingPlugin,
 	shouldProcess *plugin.ShouldProcessChecker,
 	groupKeyGen *plugin.GroupKeyGenerator,
-	readyChecker *plugin.ReadyChecker,
 	event watcher.Event,
 	logger *log.Logger,
 ) error {
@@ -172,26 +171,21 @@ func processEvent(
 		return nil
 	}
 
-	// Check if file is ready for transformation
-	if readyChecker != nil {
-		ready, err := readyChecker.Check(ctx, event.Path)
-		if err != nil {
-			return fmt.Errorf("ready check failed: %w", err)
-		}
-		if !ready {
-			logger.Printf("Skipping %s: not ready for transformation", event.Path)
-			return nil
-		}
-	}
-
-	// Generate output filenames
-	outputs, err := filenameGen.Generate(ctx, event.Path)
+	// Generate output filenames and check readiness
+	// The naming plugin returns both outputs and ready status in one call
+	naming, err := namingPlugin.Generate(ctx, event.Path)
 	if err != nil {
-		return fmt.Errorf("filename generator failed: %w", err)
+		return fmt.Errorf("naming plugin failed: %w", err)
 	}
 
-	// Check if we should process
-	shouldProc, reason, err := shouldProcess.Check(ctx, event.Path, outputs, event.IsModify)
+	// Check if file is ready for transformation (from naming plugin's "ready" field)
+	if !naming.Ready {
+		logger.Printf("Skipping %s: not ready for transformation", event.Path)
+		return nil
+	}
+
+	// Check if we should process (based on modification policy, NOT readiness)
+	shouldProc, reason, err := shouldProcess.Check(ctx, event.Path, naming.Outputs, event.IsModify)
 	if err != nil {
 		return fmt.Errorf("should_process check failed: %w", err)
 	}
@@ -218,6 +212,7 @@ func processEvent(
 	}
 
 	// Handle versioned policy
+	outputs := naming.Outputs
 	if cfg.OnModified == config.ModifiedVersioned && event.IsModify {
 		// Find next version number
 		version := 1
@@ -277,6 +272,9 @@ func watchDryRun(cfg *config.Config) error {
 	fmt.Println()
 
 	fmt.Printf("Input patterns: %v\n", cfg.Inputs.Patterns)
+	if watchPattern != "" {
+		fmt.Printf("Pattern filter: %s\n", watchPattern)
+	}
 	if len(cfg.Watch.Ignore) > 0 {
 		fmt.Printf("Ignore patterns: %v\n", cfg.Watch.Ignore)
 	}
@@ -291,10 +289,11 @@ func watchDryRun(cfg *config.Config) error {
 
 	fmt.Println("When a matching file is created or modified:")
 	fmt.Println("  1. Check if file matches input patterns")
-	fmt.Println("  2. Run filename generator plugin (if configured)")
-	fmt.Println("  3. Run should_process plugin (if configured)")
-	fmt.Println("  4. Queue job for processing")
-	fmt.Println("  5. Execute command with input/output substitution")
+	fmt.Println("  2. Run naming plugin to get outputs and ready status")
+	fmt.Println("  3. Skip if ready=false (file not ready for transformation)")
+	fmt.Println("  4. Run should_process check (policy-based: timestamps, output existence)")
+	fmt.Println("  5. Queue job for processing")
+	fmt.Println("  6. Execute command with input/output substitution")
 
 	return nil
 }

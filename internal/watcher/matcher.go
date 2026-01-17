@@ -9,8 +9,9 @@ import (
 
 // Matcher handles pattern matching for input files
 type Matcher struct {
-	patterns []config.PatternConfig
-	ignore   []string
+	patterns      []config.PatternConfig
+	ignore        []string
+	patternFilter string // if non-empty, only match patterns with this name
 }
 
 // MatchResult contains information about a pattern match
@@ -22,8 +23,18 @@ type MatchResult struct {
 // NewMatcher creates a new file matcher
 func NewMatcher(patterns []config.PatternConfig, ignore []string) *Matcher {
 	return &Matcher{
-		patterns: patterns,
-		ignore:   ignore,
+		patterns:      patterns,
+		ignore:        ignore,
+		patternFilter: "",
+	}
+}
+
+// NewMatcherWithFilter creates a new file matcher that only matches patterns with the given name
+func NewMatcherWithFilter(patterns []config.PatternConfig, ignore []string, patternFilter string) *Matcher {
+	return &Matcher{
+		patterns:      patterns,
+		ignore:        ignore,
+		patternFilter: patternFilter,
 	}
 }
 
@@ -43,6 +54,14 @@ func (m *Matcher) MatchWithPattern(path string) *MatchResult {
 	// Check each input pattern with its exclusions
 	for i := range m.patterns {
 		p := &m.patterns[i]
+
+		// If a filter is active, only match patterns with that name
+		if m.patternFilter != "" {
+			if p.Name != m.patternFilter {
+				continue // Skip patterns that don't match the filter
+			}
+		}
+
 		if m.matchesPattern(path, p.Pattern) {
 			// Check pattern-specific exclusions
 			if len(p.Exclude) > 0 && m.matchesAny(path, p.Exclude) {

@@ -28,7 +28,7 @@ func init() {
 	rootCmd.AddCommand(queueCmd)
 	queueCmd.AddCommand(queueListCmd)
 
-	queueListCmd.Flags().IntVarP(&queueLimit, "limit", "n", 50, "maximum number of items to show")
+	queueListCmd.Flags().IntVarP(&queueLimit, "limit", "l", 50, "maximum number of items to show")
 }
 
 func runQueueList(cmd *cobra.Command, args []string) error {

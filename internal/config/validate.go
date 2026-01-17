@@ -27,23 +27,23 @@ func Validate(cfg *Config) []error {
 		})
 	}
 
-	// Plugins validation
-	if cfg.Plugins.FilenameGenerator == nil {
+	// Plugins validation - naming plugin handles both filename generation AND ready checks
+	if cfg.Plugins.Naming == nil {
 		errs = append(errs, ValidationError{
-			Field:   "plugins.filename_generator",
-			Message: "filename_generator plugin is required",
+			Field:   "plugins.naming",
+			Message: "naming plugin is required (handles filename generation and ready checks)",
 		})
 	} else {
-		if cfg.Plugins.FilenameGenerator.Path == "" {
+		if cfg.Plugins.Naming.Path == "" {
 			errs = append(errs, ValidationError{
-				Field:   "plugins.filename_generator.path",
+				Field:   "plugins.naming.path",
 				Message: "path is required",
 			})
 		} else {
-			pluginPath := cfg.ResolvePath(cfg.Plugins.FilenameGenerator.Path)
+			pluginPath := cfg.ResolvePath(cfg.Plugins.Naming.Path)
 			if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
 				errs = append(errs, ValidationError{
-					Field:   "plugins.filename_generator.path",
+					Field:   "plugins.naming.path",
 					Message: fmt.Sprintf("plugin not found: %s", pluginPath),
 				})
 			}
@@ -103,6 +103,20 @@ func Validate(cfg *Config) []error {
 			Field:   "inputs.patterns",
 			Message: "at least one input pattern is required",
 		})
+	}
+
+	// Validate pattern names are unique (when provided)
+	seenNames := make(map[string]int)
+	for i, p := range cfg.Inputs.Patterns {
+		if p.Name != "" {
+			if prevIdx, exists := seenNames[p.Name]; exists {
+				errs = append(errs, ValidationError{
+					Field:   fmt.Sprintf("inputs.patterns[%d].name", i),
+					Message: fmt.Sprintf("duplicate pattern name %q (also used at index %d)", p.Name, prevIdx),
+				})
+			}
+			seenNames[p.Name] = i
+		}
 	}
 
 	return errs

@@ -11,8 +11,13 @@ watch:
 
 inputs:
   patterns:
-    - "*.txt"
-    - "*.md"
+    # Named patterns can be targeted with --pattern / -p flag
+    - name: text
+      pattern: "*.txt"
+    - name: markdown
+      pattern: "*.md"
+    # Unnamed patterns still work (matched when no filter is active)
+    # - "*.log"
 
 outputs:
   root: ./output
@@ -22,10 +27,13 @@ outputs:
 command: ["sh", "-c", "cat {{input}} | tr 'a-z' 'A-Z' > {{output}}"]
 
 plugins:
-  filename_generator:
-    path: ./plugins/filename_gen.sh
+  # Naming plugin returns JSON: {"outputs": ["out.txt"], "ready": true}
+  # - outputs: generated output filenames
+  # - ready: if false, file is skipped (defaults to true)
+  naming:
+    path: ./plugins/naming.sh
     args: []
-  # Optional: custom should_process logic
+  # Optional: custom should_process logic (for modification policy, NOT readiness)
   # should_process:
   #   path: ./plugins/should_process.sh
   #   args: []

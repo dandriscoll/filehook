@@ -9,68 +9,52 @@ import (
 	"github.com/dandriscoll/filehook/internal/config"
 )
 
-// FilenameGeneratorOutput is the expected JSON output from the filename generator plugin
-type FilenameGeneratorOutput struct {
+// NamingOutput is the expected JSON output from the naming plugin
+type NamingOutput struct {
 	Outputs []string `json:"outputs"`
+	Ready   *bool    `json:"ready,omitempty"` // Optional: if false, file is not ready for processing
 }
 
-// ReadyChecker checks whether a file is ready for transformation using the naming tool
-type ReadyChecker struct {
-	runner *Runner
+// NamingResult contains both the generated outputs and the ready status
+type NamingResult struct {
+	Outputs []string // Resolved absolute output paths
+	Ready   bool     // Whether the file is ready for processing (defaults to true if not specified)
 }
 
-// NewReadyChecker creates a new ready checker using the naming tool
-func NewReadyChecker(cfg *config.Config) (*ReadyChecker, error) {
-	if cfg.Plugins.FilenameGenerator == nil {
-		return nil, fmt.Errorf("filename_generator plugin not configured")
-	}
-
-	pluginPath := cfg.ResolvePath(cfg.Plugins.FilenameGenerator.Path)
-
-	// The ready command uses the same plugin path but with "ready" as the first arg
-	return &ReadyChecker{
-		runner: NewRunner(pluginPath, []string{"ready"}, cfg.ConfigDir),
-	}, nil
-}
-
-// Check returns true if the file is ready for transformation
-func (rc *ReadyChecker) Check(ctx context.Context, inputPath string) (bool, error) {
-	result, err := rc.runner.Run(ctx, inputPath)
-	if err != nil {
-		return false, fmt.Errorf("ready check failed: %w", err)
-	}
-
-	if result.ExitCode != 0 {
-		return false, fmt.Errorf("ready check failed with exit code %d: %s", result.ExitCode, result.Stderr)
-	}
-
-	output := trimNewline(result.Stdout)
-	return output == "true", nil
-}
-
-// FilenameGenerator wraps the filename generator plugin
-type FilenameGenerator struct {
+// NamingPlugin wraps the naming plugin which handles both filename generation
+// and readiness checks. These are combined because they're closely related -
+// both depend on understanding the external source state.
+//
+// The plugin returns JSON with:
+//   - "outputs": array of output filenames (required)
+//   - "ready": boolean indicating if file is ready (optional, defaults to true)
+//
+// NOTE: The "ready" check is NOT the same as ShouldProcessChecker.
+// Ready asks "is the external source ready?" (e.g., is upstream done writing?)
+// ShouldProcess asks "should we process based on our policy?" (e.g., are outputs stale?)
+type NamingPlugin struct {
 	runner     *Runner
 	outputRoot string
 }
 
-// NewFilenameGenerator creates a new filename generator plugin wrapper
-func NewFilenameGenerator(cfg *config.Config) (*FilenameGenerator, error) {
-	if cfg.Plugins.FilenameGenerator == nil {
-		return nil, fmt.Errorf("filename_generator plugin not configured")
+// NewNamingPlugin creates a new naming plugin wrapper
+func NewNamingPlugin(cfg *config.Config) (*NamingPlugin, error) {
+	if cfg.Plugins.Naming == nil {
+		return nil, fmt.Errorf("naming plugin not configured")
 	}
 
-	pluginPath := cfg.ResolvePath(cfg.Plugins.FilenameGenerator.Path)
+	pluginPath := cfg.ResolvePath(cfg.Plugins.Naming.Path)
 
-	return &FilenameGenerator{
-		runner:     NewRunner(pluginPath, cfg.Plugins.FilenameGenerator.Args, cfg.ConfigDir),
+	return &NamingPlugin{
+		runner:     NewRunner(pluginPath, cfg.Plugins.Naming.Args, cfg.ConfigDir),
 		outputRoot: cfg.OutputRoot(),
 	}, nil
 }
 
-// Generate calls the plugin to generate output filenames for an input file
-func (fg *FilenameGenerator) Generate(ctx context.Context, inputPath string) ([]string, error) {
-	result, err := fg.runner.Run(ctx, inputPath)
+// Generate calls the plugin to generate output filenames and check readiness for an input file.
+// Returns outputs and ready status. If the plugin doesn't specify "ready", it defaults to true.
+func (np *NamingPlugin) Generate(ctx context.Context, inputPath string) (*NamingResult, error) {
+	result, err := np.runner.Run(ctx, inputPath)
 	if err != nil {
 		return nil, fmt.Errorf("plugin execution failed: %w", err)
 	}
@@ -79,7 +63,7 @@ func (fg *FilenameGenerator) Generate(ctx context.Context, inputPath string) ([]
 		return nil, fmt.Errorf("plugin failed with exit code %d: %s", result.ExitCode, result.Stderr)
 	}
 
-	var output FilenameGeneratorOutput
+	var output NamingOutput
 	if err := json.Unmarshal([]byte(result.Stdout), &output); err != nil {
 		return nil, fmt.Errorf("failed to parse plugin output: %w (output: %s)", err, result.Stdout)
 	}
@@ -94,11 +78,20 @@ func (fg *FilenameGenerator) Generate(ctx context.Context, inputPath string) ([]
 		if filepath.IsAbs(p) {
 			resolved[i] = p
 		} else {
-			resolved[i] = filepath.Join(fg.outputRoot, p)
+			resolved[i] = filepath.Join(np.outputRoot, p)
 		}
 	}
 
-	return resolved, nil
+	// Default ready to true if not specified
+	ready := true
+	if output.Ready != nil {
+		ready = *output.Ready
+	}
+
+	return &NamingResult{
+		Outputs: resolved,
+		Ready:   ready,
+	}, nil
 }
 
 // GroupKeyGenerator wraps the group key plugin

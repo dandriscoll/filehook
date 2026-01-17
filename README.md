@@ -36,13 +36,14 @@ cd my-project
 mkdir -p input output plugins
 ```
 
-### 2. Create a filename generator plugin
+### 2. Create a naming plugin
+
+The naming plugin handles both filename generation AND ready checks in a single JSON response (they're closely related since both depend on external source state).
 
 ```bash
-cat > plugins/filename_gen.sh << 'EOF'
+cat > plugins/naming.sh << 'EOF'
 #!/bin/bash
-# Input: first argument is the input file path
-# Output: JSON with "outputs" array
+# Naming plugin - returns both outputs and ready status
 
 INPUT_PATH="$1"
 BASENAME=$(basename "$INPUT_PATH")
@@ -50,9 +51,10 @@ NAME="${BASENAME%.*}"
 EXT="${BASENAME##*.}"
 
 # Example: input.txt -> input.processed.txt
-echo "{\"outputs\": [\"${NAME}.processed.${EXT}\"]}"
+# Return JSON with outputs and ready status
+echo "{\"outputs\": [\"${NAME}.processed.${EXT}\"], \"ready\": true}"
 EOF
-chmod +x plugins/filename_gen.sh
+chmod +x plugins/naming.sh
 ```
 
 ### 3. Create a config file
@@ -79,8 +81,8 @@ outputs:
 command: ["cp", "{{input}}", "{{output}}"]
 
 plugins:
-  filename_generator:
-    path: ./plugins/filename_gen.sh
+  naming:
+    path: ./plugins/naming.sh
 
 concurrency:
   mode: parallel
@@ -147,10 +149,10 @@ command: ["cmd", "{{input}}", "{{output}}"]  # Command to run
 # command: "cp {{input}} {{output}}"
 
 plugins:
-  filename_generator:         # Required: generates output filenames
-    path: ./plugins/gen.sh
+  naming:                     # Required: handles filename generation AND ready checks
+    path: ./plugins/naming.sh
     args: []
-  should_process:             # Optional: custom processing logic
+  should_process:             # Optional: custom processing policy (NOT readiness - use naming for that)
     path: ./plugins/check.sh
     args: []
   group_key:                  # Optional: grouping for sequential scheduler
@@ -196,20 +198,24 @@ The command also receives these environment variables:
 
 ## Plugin Contracts
 
-### Filename Generator (Required)
+### Naming Plugin (Required)
 
-Generates output filenames for each input file.
+Handles both filename generation AND ready checks in a single call. These are combined because they're closely related - both depend on understanding the external source state.
 
 **Invocation**: Called with input path as first argument, plus any configured args.
 
-**Output**: JSON to stdout:
+**Output**: JSON to stdout with:
+- `"outputs"`: array of output filenames (required)
+- `"ready"`: boolean indicating if file is ready for processing (optional, defaults to true)
+
 ```json
 {
-  "outputs": ["output1.txt", "output2.txt"]
+  "outputs": ["output1.txt", "output2.txt"],
+  "ready": true
 }
 ```
 
-Paths are relative to `outputs.root` unless absolute.
+Paths are relative to `outputs.root` unless absolute. If `ready` is false, the file is skipped.
 
 **Exit codes**:
 - 0: Success
@@ -221,12 +227,19 @@ Paths are relative to `outputs.root` unless absolute.
 INPUT_PATH="$1"
 BASENAME=$(basename "$INPUT_PATH")
 NAME="${BASENAME%.*}"
-echo "{\"outputs\": [\"${NAME}.processed.txt\"]}"
+
+# Check if file is ready (e.g., external system done writing)
+READY=true
+
+# Return both outputs and ready status
+echo "{\"outputs\": [\"${NAME}.processed.txt\"], \"ready\": $READY}"
 ```
 
 ### Should-Process Plugin (Optional)
 
-Custom logic to decide whether to process a file.
+Custom logic to decide whether to process a file based on modification policy.
+
+**IMPORTANT**: This is NOT for checking file readiness. Use the naming plugin's ready check for that. Should-process checks whether outputs need regeneration based on timestamps and policy.
 
 **Invocation**: Receives JSON via stdin.
 

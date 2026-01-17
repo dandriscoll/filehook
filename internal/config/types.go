@@ -45,6 +45,7 @@ type InputsConfig struct {
 
 // PatternConfig defines a single input pattern with optional exclusions and command
 type PatternConfig struct {
+	Name    string         `yaml:"name"`    // optional pattern name for CLI targeting
 	Pattern string         `yaml:"pattern"`
 	Exclude []string       `yaml:"exclude"`
 	Command *CommandConfig `yaml:"command,omitempty"`
@@ -60,6 +61,7 @@ func (p *PatternConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	// Try string first (simple pattern)
 	var s string
 	if err := unmarshal(&s); err == nil {
+		p.Name = ""
 		p.Pattern = s
 		p.Exclude = nil
 		p.Command = nil
@@ -67,6 +69,7 @@ func (p *PatternConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	}
 	// Try object format
 	type patternConfigRaw struct {
+		Name    string         `yaml:"name"`
 		Pattern string         `yaml:"pattern"`
 		Exclude []string       `yaml:"exclude"`
 		Command *CommandConfig `yaml:"command"`
@@ -75,6 +78,7 @@ func (p *PatternConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	if err := unmarshal(&raw); err != nil {
 		return err
 	}
+	p.Name = raw.Name
 	p.Pattern = raw.Pattern
 	p.Exclude = raw.Exclude
 	p.Command = raw.Command
@@ -142,9 +146,18 @@ func (c CommandConfig) AsSlice() []string {
 
 // PluginsConfig defines the plugin configurations
 type PluginsConfig struct {
-	FilenameGenerator *PluginConfig `yaml:"filename_generator"`
-	ShouldProcess     *PluginConfig `yaml:"should_process"`
-	GroupKey          *PluginConfig `yaml:"group_key"`
+	// Naming handles output filename generation AND file readiness checks in one call.
+	// Returns JSON: {"outputs": ["file1.txt"], "ready": true}
+	// - "outputs" (required): array of output filenames
+	// - "ready" (optional): if false, file is skipped (defaults to true)
+	Naming *PluginConfig `yaml:"naming"`
+
+	// ShouldProcess determines whether to process a file based on modification policy.
+	// NOTE: This is NOT for checking file readiness - use the Naming plugin's "ready" field.
+	// ShouldProcess checks whether outputs need regeneration based on timestamps/policy.
+	ShouldProcess *PluginConfig `yaml:"should_process"`
+
+	GroupKey *PluginConfig `yaml:"group_key"`
 }
 
 // PluginConfig defines a single plugin

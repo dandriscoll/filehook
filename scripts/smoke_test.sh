@@ -60,17 +60,19 @@ mkdir -p "$TMPDIR/input"
 mkdir -p "$TMPDIR/output"
 mkdir -p "$TMPDIR/plugins"
 
-# Create filename generator plugin
-cat > "$TMPDIR/plugins/filename_gen.sh" << 'EOF'
+# Create naming plugin (handles both filename generation and ready checks in one call)
+cat > "$TMPDIR/plugins/naming.sh" << 'EOF'
 #!/bin/bash
+# Naming plugin returns JSON with both outputs and ready status
 INPUT_PATH="$1"
 BASENAME=$(basename "$INPUT_PATH")
 NAME="${BASENAME%.*}"
 EXT="${BASENAME##*.}"
 OUTPUT_NAME="${NAME}.upper.${EXT}"
-echo "{\"outputs\": [\"$OUTPUT_NAME\"]}"
+# Return both outputs and ready=true in JSON
+echo "{\"outputs\": [\"$OUTPUT_NAME\"], \"ready\": true}"
 EOF
-chmod +x "$TMPDIR/plugins/filename_gen.sh"
+chmod +x "$TMPDIR/plugins/naming.sh"
 
 # Create config
 cat > "$TMPDIR/filehook.yaml" << EOF
@@ -93,8 +95,8 @@ outputs:
 command: ["sh", "-c", "cat \"\$FILEHOOK_INPUT\" | tr 'a-z' 'A-Z' > \"\$FILEHOOK_OUTPUT\""]
 
 plugins:
-  filename_generator:
-    path: ./plugins/filename_gen.sh
+  naming:
+    path: ./plugins/naming.sh
 
 concurrency:
   mode: parallel
@@ -221,8 +223,8 @@ outputs:
 command: ["sh", "-c", "exit 1"]
 
 plugins:
-  filename_generator:
-    path: ./plugins/filename_gen.sh
+  naming:
+    path: ./plugins/naming.sh
 
 concurrency:
   mode: parallel

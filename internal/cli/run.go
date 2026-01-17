@@ -18,6 +18,7 @@ import (
 )
 
 var runOne bool
+var runPattern string
 
 var runCmd = &cobra.Command{
 	Use:   "run",
@@ -28,6 +29,7 @@ var runCmd = &cobra.Command{
 
 func init() {
 	runCmd.Flags().BoolVar(&runOne, "run-one", false, "process only the first job and exit")
+	runCmd.Flags().StringVarP(&runPattern, "pattern", "p", "", "only process files matching the named pattern")
 	rootCmd.AddCommand(runCmd)
 }
 
@@ -83,23 +85,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	// Initialize plugins
-	filenameGen, err := plugin.NewFilenameGenerator(cfg)
+	namingPlugin, err := plugin.NewNamingPlugin(cfg)
 	if err != nil {
-		return fmt.Errorf("failed to initialize filename generator: %w", err)
+		return fmt.Errorf("failed to initialize naming plugin: %w", err)
 	}
 
 	shouldProcess := plugin.NewShouldProcessChecker(cfg)
 	groupKeyGen := plugin.NewGroupKeyGenerator(cfg)
 
-	// Initialize ready checker (optional - nil if not supported)
-	readyChecker, err := plugin.NewReadyChecker(cfg)
-	if err != nil {
-		logger.Printf("Ready checker not available: %v", err)
-		readyChecker = nil
-	}
-
 	// Create matcher for scanning
-	matcher := watcher.NewMatcher(cfg.Inputs.Patterns, cfg.Watch.Ignore)
+	matcher := watcher.NewMatcherWithFilter(cfg.Inputs.Patterns, cfg.Watch.Ignore, runPattern)
 
 	// Create a temporary watcher just for scanning
 	w, err := watcher.New(matcher, cfg.Watch.DebounceDuration())
@@ -109,14 +104,18 @@ func runRun(cmd *cobra.Command, args []string) error {
 	defer w.Close()
 
 	// Scan existing files
-	logger.Println("Scanning for input files...")
+	if runPattern != "" {
+		logger.Printf("Scanning for input files matching pattern %q...", runPattern)
+	} else {
+		logger.Println("Scanning for input files...")
+	}
 
 	// Start consuming events in a goroutine
 	eventsDone := make(chan struct{})
 	go func() {
 		defer close(eventsDone)
 		for event := range w.Events() {
-			if err := processEvent(ctx, cfg, store, filenameGen, shouldProcess, groupKeyGen, readyChecker, event, logger); err != nil {
+			if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger); err != nil {
 				logger.Printf("Error processing %s: %v", event.Path, err)
 			}
 		}
@@ -220,15 +219,15 @@ func runDryRun(cfg *config.Config) error {
 	ctx := context.Background()
 
 	// Initialize plugins
-	filenameGen, err := plugin.NewFilenameGenerator(cfg)
+	namingPlugin, err := plugin.NewNamingPlugin(cfg)
 	if err != nil {
-		return fmt.Errorf("failed to initialize filename generator: %w", err)
+		return fmt.Errorf("failed to initialize naming plugin: %w", err)
 	}
 
 	shouldProcess := plugin.NewShouldProcessChecker(cfg)
 
 	// Create matcher for scanning
-	matcher := watcher.NewMatcher(cfg.Inputs.Patterns, cfg.Watch.Ignore)
+	matcher := watcher.NewMatcherWithFilter(cfg.Inputs.Patterns, cfg.Watch.Ignore, runPattern)
 
 	// Create a temporary watcher just for scanning
 	w, err := watcher.New(matcher, cfg.Watch.DebounceDuration())
@@ -239,6 +238,9 @@ func runDryRun(cfg *config.Config) error {
 
 	fmt.Printf("Watch paths: %v\n", getEffectiveWatchPaths(cfg))
 	fmt.Printf("Input patterns: %v\n", cfg.Inputs.Patterns)
+	if runPattern != "" {
+		fmt.Printf("Pattern filter: %s\n", runPattern)
+	}
 	if len(cfg.Watch.Ignore) > 0 {
 		fmt.Printf("Ignore patterns: %v\n", cfg.Watch.Ignore)
 	}
@@ -251,7 +253,7 @@ func runDryRun(cfg *config.Config) error {
 	go func() {
 		defer close(eventsDone)
 		for event := range w.Events() {
-			job, skip, reason := buildDryRunJob(ctx, cfg, filenameGen, shouldProcess, event)
+			job, skip, reason := buildDryRunJob(ctx, cfg, namingPlugin, shouldProcess, event)
 			if skip {
 				fmt.Printf("Skip: %s (%s)\n", event.Path, reason)
 				continue
@@ -297,18 +299,23 @@ type dryRunJob struct {
 func buildDryRunJob(
 	ctx context.Context,
 	cfg *config.Config,
-	filenameGen *plugin.FilenameGenerator,
+	namingPlugin *plugin.NamingPlugin,
 	shouldProcess *plugin.ShouldProcessChecker,
 	event watcher.Event,
 ) (dryRunJob, bool, string) {
-	// Generate output filenames
-	outputs, err := filenameGen.Generate(ctx, event.Path)
+	// Generate output filenames and check readiness
+	naming, err := namingPlugin.Generate(ctx, event.Path)
 	if err != nil {
-		return dryRunJob{}, true, fmt.Sprintf("filename gen failed: %v", err)
+		return dryRunJob{}, true, fmt.Sprintf("naming plugin failed: %v", err)
 	}
 
-	// Check if we should process
-	shouldProc, reason, err := shouldProcess.Check(ctx, event.Path, outputs, event.IsModify)
+	// Check if file is ready (from naming plugin's "ready" field)
+	if !naming.Ready {
+		return dryRunJob{}, true, "not ready for transformation"
+	}
+
+	// Check if we should process (based on modification policy)
+	shouldProc, reason, err := shouldProcess.Check(ctx, event.Path, naming.Outputs, event.IsModify)
 	if err != nil {
 		return dryRunJob{}, true, fmt.Sprintf("should_process failed: %v", err)
 	}
@@ -325,6 +332,7 @@ func buildDryRunJob(
 	}
 
 	// Build command preview with variable substitution
+	outputs := naming.Outputs
 	command := make([]string, len(cmdSlice))
 	for i, arg := range cmdSlice {
 		arg = strings.ReplaceAll(arg, "{{input}}", event.Path)

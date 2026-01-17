@@ -36,7 +36,7 @@ func init() {
 	errorsCmd.AddCommand(errorsListCmd)
 	errorsCmd.AddCommand(errorsShowCmd)
 
-	errorsListCmd.Flags().IntVarP(&errorsLimit, "limit", "n", 50, "maximum number of items to show")
+	errorsListCmd.Flags().IntVarP(&errorsLimit, "limit", "l", 50, "maximum number of items to show")
 }
 
 func runErrorsList(cmd *cobra.Command, args []string) error {

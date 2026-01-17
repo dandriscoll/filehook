@@ -34,9 +34,13 @@ command: ["sh", "-c", "cp {{input}} {{output}}"]
 
 # Optional plugins for custom behavior
 # plugins:
-#   filename_generator:
-#     path: ./plugins/filename_gen.sh
+#   # Naming plugin returns JSON: {"outputs": ["out.txt"], "ready": true}
+#   # - outputs: generated output filenames
+#   # - ready: if false, file is skipped (defaults to true)
+#   naming:
+#     path: ./plugins/naming.sh
 #     args: []
+#   # should_process checks modification policy (NOT readiness - use naming for that)
 #   should_process:
 #     path: ./plugins/should_process.sh
 #     args: []
