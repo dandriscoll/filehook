@@ -12,6 +12,7 @@ var (
 	// Global flags
 	cfgFile    string
 	jsonOutput bool
+	dryRun     bool
 
 	// Loaded config (set during PreRunE)
 	loadedConfig *config.Config
@@ -41,6 +42,11 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file (default: search for filehook.yaml)")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "output in JSON format")
+	rootCmd.PersistentFlags().BoolVarP(&dryRun, "dry-run", "n", false, "print what would be done without executing")
+
+	// Make -? work as an alias for -h (help)
+	rootCmd.PersistentFlags().BoolP("help", "?", false, "help for filehook")
+	rootCmd.PersistentFlags().Lookup("help").Hidden = true
 }
 
 // loadConfig loads and validates the config, used by subcommands that need it
@@ -93,4 +99,9 @@ func validateConfig(cfg *config.Config) error {
 // isJSONOutput returns whether JSON output is requested
 func isJSONOutput() bool {
 	return jsonOutput
+}
+
+// isDryRun returns whether dry-run mode is enabled
+func isDryRun() bool {
+	return dryRun
 }

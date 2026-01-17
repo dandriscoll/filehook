@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/dandriscoll/filehook/internal/config"
@@ -35,6 +36,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	if err := validateConfig(cfg); err != nil {
 		return err
+	}
+
+	// In dry-run mode, use a simplified flow
+	if isDryRun() {
+		return runDryRun(cfg)
 	}
 
 	// Setup logger
@@ -195,4 +201,127 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// runDryRun performs a dry-run scan and prints what would be done
+func runDryRun(cfg *config.Config) error {
+	fmt.Println("Dry-run mode: showing what would be done")
+	fmt.Println()
+
+	ctx := context.Background()
+
+	// Initialize plugins
+	filenameGen, err := plugin.NewFilenameGenerator(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize filename generator: %w", err)
+	}
+
+	shouldProcess := plugin.NewShouldProcessChecker(cfg)
+
+	// Create matcher for scanning
+	matcher := watcher.NewMatcher(cfg.Inputs.Patterns, cfg.Watch.Ignore)
+
+	// Create a temporary watcher just for scanning
+	w, err := watcher.New(matcher, cfg.Watch.DebounceDuration())
+	if err != nil {
+		return fmt.Errorf("failed to create scanner: %w", err)
+	}
+	defer w.Close()
+
+	fmt.Printf("Watch paths: %v\n", cfg.WatchPaths())
+	fmt.Printf("Input patterns: %v\n", cfg.Inputs.Patterns)
+	if len(cfg.Watch.Ignore) > 0 {
+		fmt.Printf("Ignore patterns: %v\n", cfg.Watch.Ignore)
+	}
+	fmt.Printf("Command: %v\n", cfg.Command.AsSlice())
+	fmt.Println()
+
+	// Collect events
+	var jobs []dryRunJob
+	eventsDone := make(chan struct{})
+	go func() {
+		defer close(eventsDone)
+		for event := range w.Events() {
+			job, skip, reason := buildDryRunJob(ctx, cfg, filenameGen, shouldProcess, event)
+			if skip {
+				fmt.Printf("Skip: %s (%s)\n", event.Path, reason)
+				continue
+			}
+			jobs = append(jobs, job)
+		}
+	}()
+
+	// Scan files
+	if err := w.ScanExisting(ctx, cfg.WatchPaths()); err != nil {
+		return fmt.Errorf("failed to scan: %w", err)
+	}
+
+	w.Close()
+	<-eventsDone
+
+	fmt.Println()
+	if len(jobs) == 0 {
+		fmt.Println("No files to process")
+		return nil
+	}
+
+	fmt.Printf("Would process %d file(s):\n", len(jobs))
+	fmt.Println()
+	for i, job := range jobs {
+		fmt.Printf("%d. %s\n", i+1, job.InputPath)
+		fmt.Printf("   Output: %v\n", job.OutputPaths)
+		fmt.Printf("   Command: %v\n", job.Command)
+		fmt.Println()
+	}
+
+	return nil
+}
+
+// dryRunJob represents a job that would be executed
+type dryRunJob struct {
+	InputPath   string
+	OutputPaths []string
+	Command     []string
+}
+
+// buildDryRunJob creates a dry-run job from an event
+func buildDryRunJob(
+	ctx context.Context,
+	cfg *config.Config,
+	filenameGen *plugin.FilenameGenerator,
+	shouldProcess *plugin.ShouldProcessChecker,
+	event watcher.Event,
+) (dryRunJob, bool, string) {
+	// Generate output filenames
+	outputs, err := filenameGen.Generate(ctx, event.Path)
+	if err != nil {
+		return dryRunJob{}, true, fmt.Sprintf("filename gen failed: %v", err)
+	}
+
+	// Check if we should process
+	shouldProc, reason, err := shouldProcess.Check(ctx, event.Path, outputs, event.IsModify)
+	if err != nil {
+		return dryRunJob{}, true, fmt.Sprintf("should_process failed: %v", err)
+	}
+	if !shouldProc {
+		return dryRunJob{}, true, reason
+	}
+
+	// Build command preview
+	cmdSlice := cfg.Command.AsSlice()
+	command := make([]string, len(cmdSlice))
+	for i, arg := range cmdSlice {
+		arg = strings.ReplaceAll(arg, "{{input}}", event.Path)
+		if len(outputs) > 0 {
+			arg = strings.ReplaceAll(arg, "{{output}}", outputs[0])
+		}
+		arg = strings.ReplaceAll(arg, "{{outputs}}", strings.Join(outputs, " "))
+		command[i] = arg
+	}
+
+	return dryRunJob{
+		InputPath:   event.Path,
+		OutputPaths: outputs,
+		Command:     command,
+	}, false, reason
 }

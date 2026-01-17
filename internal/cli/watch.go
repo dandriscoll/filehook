@@ -37,6 +37,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// In dry-run mode, show what would be watched
+	if isDryRun() {
+		return watchDryRun(cfg)
+	}
+
 	// Setup logger
 	logger := log.New(os.Stdout, "[filehook] ", log.LstdFlags)
 
@@ -248,5 +253,39 @@ func processEvent(
 	}
 
 	logger.Printf("Queued: %s -> %v (reason: %s)", event.Path, outputs, reason)
+	return nil
+}
+
+// watchDryRun prints what the watch command would do
+func watchDryRun(cfg *config.Config) error {
+	fmt.Println("Dry-run mode: showing watch configuration")
+	fmt.Println()
+
+	fmt.Printf("Watch paths:\n")
+	for _, path := range cfg.WatchPaths() {
+		fmt.Printf("  - %s\n", path)
+	}
+	fmt.Println()
+
+	fmt.Printf("Input patterns: %v\n", cfg.Inputs.Patterns)
+	if len(cfg.Watch.Ignore) > 0 {
+		fmt.Printf("Ignore patterns: %v\n", cfg.Watch.Ignore)
+	}
+	fmt.Println()
+
+	fmt.Printf("Command: %v\n", cfg.Command.AsSlice())
+	fmt.Println()
+
+	fmt.Printf("Concurrency: %s mode with %d workers\n", cfg.Concurrency.Mode, cfg.Concurrency.MaxWorkers)
+	fmt.Printf("Debounce: %s\n", cfg.Watch.DebounceDuration())
+	fmt.Println()
+
+	fmt.Println("When a matching file is created or modified:")
+	fmt.Println("  1. Check if file matches input patterns")
+	fmt.Println("  2. Run filename generator plugin (if configured)")
+	fmt.Println("  3. Run should_process plugin (if configured)")
+	fmt.Println("  4. Queue job for processing")
+	fmt.Println("  5. Execute command with input/output substitution")
+
 	return nil
 }
