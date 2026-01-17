@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anthropics/filehook/internal/config"
-	"github.com/anthropics/filehook/internal/queue"
+	"github.com/dandriscoll/filehook/internal/config"
+	"github.com/dandriscoll/filehook/internal/queue"
 )
 
 // SequentialScheduler processes jobs one at a time, switching between groups

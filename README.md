@@ -15,13 +15,13 @@ A CLI-first file transformation watcher. filehook watches for input files and ru
 ## Installation
 
 ```bash
-go install github.com/anthropics/filehook/cmd/filehook@latest
+go install github.com/dandriscoll/filehook/cmd/filehook@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/anthropics/filehook
+git clone https://github.com/dandriscoll/filehook
 cd filehook
 go build -o filehook ./cmd/filehook
 ```

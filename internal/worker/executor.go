@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anthropics/filehook/internal/config"
-	"github.com/anthropics/filehook/internal/queue"
+	"github.com/dandriscoll/filehook/internal/config"
+	"github.com/dandriscoll/filehook/internal/queue"
 )
 
 // Executor runs jobs

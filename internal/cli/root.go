@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/anthropics/filehook/internal/config"
+	"github.com/dandriscoll/filehook/internal/config"
 	"github.com/spf13/cobra"
 )
 

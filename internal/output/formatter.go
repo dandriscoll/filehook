@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anthropics/filehook/internal/queue"
+	"github.com/dandriscoll/filehook/internal/queue"
 )
 
 // Formatter handles output formatting

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/anthropics/filehook/internal/config"
+	"github.com/dandriscoll/filehook/internal/config"
 )
 
 // FilenameGeneratorOutput is the expected JSON output from the filename generator plugin

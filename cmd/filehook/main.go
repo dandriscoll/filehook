@@ -1,6 +1,6 @@
 package main
 
-import "github.com/anthropics/filehook/internal/cli"
+import "github.com/dandriscoll/filehook/internal/cli"
 
 func main() {
 	cli.Execute()

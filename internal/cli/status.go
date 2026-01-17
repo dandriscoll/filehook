@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/anthropics/filehook/internal/output"
-	"github.com/anthropics/filehook/internal/queue"
+	"github.com/dandriscoll/filehook/internal/output"
+	"github.com/dandriscoll/filehook/internal/queue"
 	"github.com/spf13/cobra"
 )
 

@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/anthropics/filehook/internal/config"
+	"github.com/dandriscoll/filehook/internal/config"
 )
 
 // ShouldProcessInput is the JSON input for the should_process plugin

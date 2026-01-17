@@ -8,11 +8,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/anthropics/filehook/internal/config"
-	"github.com/anthropics/filehook/internal/plugin"
-	"github.com/anthropics/filehook/internal/queue"
-	"github.com/anthropics/filehook/internal/watcher"
-	"github.com/anthropics/filehook/internal/worker"
+	"github.com/dandriscoll/filehook/internal/config"
+	"github.com/dandriscoll/filehook/internal/plugin"
+	"github.com/dandriscoll/filehook/internal/queue"
+	"github.com/dandriscoll/filehook/internal/watcher"
+	"github.com/dandriscoll/filehook/internal/worker"
 	"github.com/spf13/cobra"
 )
 
