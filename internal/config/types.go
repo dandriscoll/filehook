@@ -40,7 +40,36 @@ func (w WatchConfig) DebounceDuration() time.Duration {
 
 // InputsConfig defines which files to process
 type InputsConfig struct {
-	Patterns []string `yaml:"patterns"`
+	Patterns []PatternConfig `yaml:"patterns"`
+}
+
+// PatternConfig defines a single input pattern with optional exclusions
+type PatternConfig struct {
+	Pattern string   `yaml:"pattern"`
+	Exclude []string `yaml:"exclude"`
+}
+
+// UnmarshalYAML handles both string and object pattern formats
+func (p *PatternConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	// Try string first (simple pattern)
+	var s string
+	if err := unmarshal(&s); err == nil {
+		p.Pattern = s
+		p.Exclude = nil
+		return nil
+	}
+	// Try object format
+	type patternConfigRaw struct {
+		Pattern string   `yaml:"pattern"`
+		Exclude []string `yaml:"exclude"`
+	}
+	var raw patternConfigRaw
+	if err := unmarshal(&raw); err != nil {
+		return err
+	}
+	p.Pattern = raw.Pattern
+	p.Exclude = raw.Exclude
+	return nil
 }
 
 // OutputsConfig defines where outputs go

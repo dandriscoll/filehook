@@ -1,4 +1,4 @@
-module github.com/anthropics/filehook
+module github.com/dandriscoll/filehook
 
 go 1.24.0
 

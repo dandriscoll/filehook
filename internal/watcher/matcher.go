@@ -3,16 +3,18 @@ package watcher
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/dandriscoll/filehook/internal/config"
 )
 
 // Matcher handles pattern matching for input files
 type Matcher struct {
-	patterns []string
+	patterns []config.PatternConfig
 	ignore   []string
 }
 
 // NewMatcher creates a new file matcher
-func NewMatcher(patterns, ignore []string) *Matcher {
+func NewMatcher(patterns []config.PatternConfig, ignore []string) *Matcher {
 	return &Matcher{
 		patterns: patterns,
 		ignore:   ignore,
@@ -20,39 +22,56 @@ func NewMatcher(patterns, ignore []string) *Matcher {
 }
 
 // Matches returns true if the path matches the input patterns
-// and doesn't match any ignore patterns
+// and doesn't match any ignore patterns (global or per-pattern)
 func (m *Matcher) Matches(path string) bool {
-	// Check ignore patterns first
+	// Check global ignore patterns first
 	if m.matchesAny(path, m.ignore) {
 		return false
 	}
 
-	// Check if it matches any input pattern
-	return m.matchesAny(path, m.patterns)
+	// Check each input pattern with its exclusions
+	for _, p := range m.patterns {
+		if m.matchesPattern(path, p.Pattern) {
+			// Check pattern-specific exclusions
+			if len(p.Exclude) > 0 && m.matchesAny(path, p.Exclude) {
+				continue // Try next pattern
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // matchesAny returns true if path matches any of the patterns
 func (m *Matcher) matchesAny(path string, patterns []string) bool {
-	base := filepath.Base(path)
-
 	for _, pattern := range patterns {
-		// Try matching against base name first (for simple patterns like "*.pdf")
-		if matched, _ := filepath.Match(pattern, base); matched {
+		if m.matchesPattern(path, pattern) {
 			return true
 		}
+	}
+	return false
+}
 
-		// Try matching against full path (for patterns with path separators)
-		if strings.Contains(pattern, "/") || strings.Contains(pattern, string(filepath.Separator)) {
-			if matched, _ := filepath.Match(pattern, path); matched {
-				return true
-			}
+// matchesPattern returns true if path matches the given pattern
+func (m *Matcher) matchesPattern(path string, pattern string) bool {
+	base := filepath.Base(path)
+
+	// Try matching against base name first (for simple patterns like "*.pdf")
+	if matched, _ := filepath.Match(pattern, base); matched {
+		return true
+	}
+
+	// Try matching against full path (for patterns with path separators)
+	if strings.Contains(pattern, "/") || strings.Contains(pattern, string(filepath.Separator)) {
+		if matched, _ := filepath.Match(pattern, path); matched {
+			return true
 		}
+	}
 
-		// Handle glob patterns like "**/*.txt"
-		if strings.Contains(pattern, "**") {
-			if m.matchGlob(path, pattern) {
-				return true
-			}
+	// Handle glob patterns like "**/*.txt"
+	if strings.Contains(pattern, "**") {
+		if m.matchGlob(path, pattern) {
+			return true
 		}
 	}
 
