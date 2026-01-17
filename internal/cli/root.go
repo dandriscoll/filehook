@@ -10,9 +10,10 @@ import (
 
 var (
 	// Global flags
-	cfgFile    string
-	jsonOutput bool
-	dryRun     bool
+	cfgFile      string
+	directory    string
+	jsonOutput   bool
+	dryRun       bool
 
 	// Loaded config (set during PreRunE)
 	loadedConfig *config.Config
@@ -41,6 +42,7 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file (default: search for filehook.yaml)")
+	rootCmd.PersistentFlags().StringVarP(&directory, "directory", "d", "", "target directory (finds config upward, processes only this dir)")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "output in JSON format")
 	rootCmd.PersistentFlags().BoolVarP(&dryRun, "dry-run", "n", false, "print what would be done without executing")
 
@@ -63,7 +65,7 @@ func loadConfig() (*config.Config, error) {
 	if cfgFile != "" {
 		cfg, err = loader.Load(cfgFile)
 	} else {
-		cfg, err = loader.DiscoverAndLoad("")
+		cfg, err = loader.DiscoverAndLoad(directory)
 	}
 
 	if err != nil {
@@ -104,4 +106,18 @@ func isJSONOutput() bool {
 // isDryRun returns whether dry-run mode is enabled
 func isDryRun() bool {
 	return dryRun
+}
+
+// getTargetDirectory returns the target directory if specified, empty string otherwise
+func getTargetDirectory() string {
+	return directory
+}
+
+// getEffectiveWatchPaths returns the watch paths to use.
+// If -d is specified, returns just that directory; otherwise uses config's watch paths.
+func getEffectiveWatchPaths(cfg *config.Config) []string {
+	if directory != "" {
+		return []string{cfg.ResolvePath(directory)}
+	}
+	return cfg.WatchPaths()
 }

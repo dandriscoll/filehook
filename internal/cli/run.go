@@ -17,6 +17,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var runOne bool
+
 var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "One-shot scan and process until queue empty",
@@ -25,6 +27,7 @@ var runCmd = &cobra.Command{
 }
 
 func init() {
+	runCmd.Flags().BoolVar(&runOne, "run-one", false, "process only the first job and exit")
 	rootCmd.AddCommand(runCmd)
 }
 
@@ -120,7 +123,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}()
 
 	// Scan files (this sends events to the channel)
-	if err := w.ScanExisting(ctx, cfg.WatchPaths()); err != nil {
+	if err := w.ScanExisting(ctx, getEffectiveWatchPaths(cfg)); err != nil {
 		return fmt.Errorf("failed to scan: %w", err)
 	}
 
@@ -139,6 +142,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if stats.Pending == 0 {
 		logger.Println("No jobs to process")
 		return nil
+	}
+
+	// Handle --run-one mode
+	if runOne {
+		logger.Println("Processing one job (--run-one mode)...")
+		return runOneJob(ctx, cfg, store, logger)
 	}
 
 	// Process all jobs
@@ -228,7 +237,7 @@ func runDryRun(cfg *config.Config) error {
 	}
 	defer w.Close()
 
-	fmt.Printf("Watch paths: %v\n", cfg.WatchPaths())
+	fmt.Printf("Watch paths: %v\n", getEffectiveWatchPaths(cfg))
 	fmt.Printf("Input patterns: %v\n", cfg.Inputs.Patterns)
 	if len(cfg.Watch.Ignore) > 0 {
 		fmt.Printf("Ignore patterns: %v\n", cfg.Watch.Ignore)
@@ -252,7 +261,7 @@ func runDryRun(cfg *config.Config) error {
 	}()
 
 	// Scan files
-	if err := w.ScanExisting(ctx, cfg.WatchPaths()); err != nil {
+	if err := w.ScanExisting(ctx, getEffectiveWatchPaths(cfg)); err != nil {
 		return fmt.Errorf("failed to scan: %w", err)
 	}
 
@@ -307,8 +316,15 @@ func buildDryRunJob(
 		return dryRunJob{}, true, reason
 	}
 
-	// Build command preview
-	cmdSlice := cfg.Command.AsSlice()
+	// Resolve command: use pattern-specific or fall back to global
+	var cmdSlice []string
+	if event.Pattern != nil && event.Pattern.HasCommand() {
+		cmdSlice = event.Pattern.Command.AsSlice()
+	} else {
+		cmdSlice = cfg.Command.AsSlice()
+	}
+
+	// Build command preview with variable substitution
 	command := make([]string, len(cmdSlice))
 	for i, arg := range cmdSlice {
 		arg = strings.ReplaceAll(arg, "{{input}}", event.Path)
@@ -324,4 +340,46 @@ func buildDryRunJob(
 		OutputPaths: outputs,
 		Command:     command,
 	}, false, reason
+}
+
+// runOneJob dequeues and executes a single job
+func runOneJob(ctx context.Context, cfg *config.Config, store queue.Store, logger *log.Logger) error {
+	// Create executor
+	executor, err := worker.NewExecutor(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create executor: %w", err)
+	}
+
+	// Dequeue one job
+	job, err := store.Dequeue(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to dequeue job: %w", err)
+	}
+	if job == nil {
+		logger.Println("No jobs available")
+		return nil
+	}
+
+	logger.Printf("Processing: %s", job.InputPath)
+
+	// Execute the job
+	result := executor.Execute(ctx, job)
+
+	if result.Error != nil {
+		logger.Printf("Failed: %v", result.Error)
+		if result.Stderr != "" {
+			logger.Printf("Stderr: %s", result.Stderr)
+		}
+		if err := store.Fail(ctx, job.ID, result); err != nil {
+			return fmt.Errorf("failed to mark job as failed: %w", err)
+		}
+		return fmt.Errorf("job failed: %w", result.Error)
+	}
+
+	logger.Printf("Completed in %dms", result.DurationMs)
+	if err := store.Complete(ctx, job.ID, result); err != nil {
+		return fmt.Errorf("failed to mark job as complete: %w", err)
+	}
+
+	return nil
 }

@@ -43,10 +43,16 @@ type InputsConfig struct {
 	Patterns []PatternConfig `yaml:"patterns"`
 }
 
-// PatternConfig defines a single input pattern with optional exclusions
+// PatternConfig defines a single input pattern with optional exclusions and command
 type PatternConfig struct {
-	Pattern string   `yaml:"pattern"`
-	Exclude []string `yaml:"exclude"`
+	Pattern string         `yaml:"pattern"`
+	Exclude []string       `yaml:"exclude"`
+	Command *CommandConfig `yaml:"command,omitempty"`
+}
+
+// HasCommand returns true if this pattern has its own command
+func (p *PatternConfig) HasCommand() bool {
+	return p.Command != nil && p.Command.raw != nil
 }
 
 // UnmarshalYAML handles both string and object pattern formats
@@ -56,12 +62,14 @@ func (p *PatternConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	if err := unmarshal(&s); err == nil {
 		p.Pattern = s
 		p.Exclude = nil
+		p.Command = nil
 		return nil
 	}
 	// Try object format
 	type patternConfigRaw struct {
-		Pattern string   `yaml:"pattern"`
-		Exclude []string `yaml:"exclude"`
+		Pattern string         `yaml:"pattern"`
+		Exclude []string       `yaml:"exclude"`
+		Command *CommandConfig `yaml:"command"`
 	}
 	var raw patternConfigRaw
 	if err := unmarshal(&raw); err != nil {
@@ -69,6 +77,7 @@ func (p *PatternConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	}
 	p.Pattern = raw.Pattern
 	p.Exclude = raw.Exclude
+	p.Command = raw.Command
 	return nil
 }
 

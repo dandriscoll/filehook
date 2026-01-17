@@ -1,10 +1,16 @@
 #!/bin/bash
 # Filename generator plugin for filehook
 #
-# Input: First argument is the input file path
+# Input: First argument is the input file path (or "ready" for ready check)
 # Output: JSON with "outputs" array of relative paths
 #
 # This example converts input.txt -> input.upper.txt
+
+# Handle ready check command
+if [ "$1" = "ready" ]; then
+    echo "true"
+    exit 0
+fi
 
 INPUT_PATH="$1"
 BASENAME=$(basename "$INPUT_PATH")

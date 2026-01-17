@@ -21,6 +21,7 @@ type Job struct {
 	OutputPaths []string   `json:"output_paths"`
 	Status      JobStatus  `json:"status"`
 	GroupKey    string     `json:"group_key,omitempty"`
+	Command     []string   `json:"command,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	StartedAt   *time.Time `json:"started_at,omitempty"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`

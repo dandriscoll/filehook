@@ -13,6 +13,12 @@ type Matcher struct {
 	ignore   []string
 }
 
+// MatchResult contains information about a pattern match
+type MatchResult struct {
+	Matched bool
+	Pattern *config.PatternConfig
+}
+
 // NewMatcher creates a new file matcher
 func NewMatcher(patterns []config.PatternConfig, ignore []string) *Matcher {
 	return &Matcher{
@@ -24,22 +30,28 @@ func NewMatcher(patterns []config.PatternConfig, ignore []string) *Matcher {
 // Matches returns true if the path matches the input patterns
 // and doesn't match any ignore patterns (global or per-pattern)
 func (m *Matcher) Matches(path string) bool {
+	return m.MatchWithPattern(path).Matched
+}
+
+// MatchWithPattern returns the matching pattern info, or a non-match result
+func (m *Matcher) MatchWithPattern(path string) *MatchResult {
 	// Check global ignore patterns first
 	if m.matchesAny(path, m.ignore) {
-		return false
+		return &MatchResult{Matched: false, Pattern: nil}
 	}
 
 	// Check each input pattern with its exclusions
-	for _, p := range m.patterns {
+	for i := range m.patterns {
+		p := &m.patterns[i]
 		if m.matchesPattern(path, p.Pattern) {
 			// Check pattern-specific exclusions
 			if len(p.Exclude) > 0 && m.matchesAny(path, p.Exclude) {
 				continue // Try next pattern
 			}
-			return true
+			return &MatchResult{Matched: true, Pattern: p}
 		}
 	}
-	return false
+	return &MatchResult{Matched: false, Pattern: nil}
 }
 
 // matchesAny returns true if path matches any of the patterns

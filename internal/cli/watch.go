@@ -102,8 +102,8 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 	defer w.Close()
 
-	// Add watch paths
-	for _, path := range cfg.WatchPaths() {
+	// Add watch paths (use -d directory if specified, otherwise config's watch paths)
+	for _, path := range getEffectiveWatchPaths(cfg) {
 		logger.Printf("Watching: %s", path)
 		if err := w.AddPath(path); err != nil {
 			return fmt.Errorf("failed to add watch path: %w", err)
@@ -241,11 +241,20 @@ func processEvent(
 		}
 	}
 
+	// Resolve command: use pattern-specific or fall back to global
+	var command []string
+	if event.Pattern != nil && event.Pattern.HasCommand() {
+		command = event.Pattern.Command.AsSlice()
+	} else {
+		command = cfg.Command.AsSlice()
+	}
+
 	// Enqueue job
 	job := &queue.Job{
 		InputPath:   event.Path,
 		OutputPaths: outputs,
 		GroupKey:    groupKey,
+		Command:     command,
 	}
 
 	if err := store.Enqueue(ctx, job); err != nil {

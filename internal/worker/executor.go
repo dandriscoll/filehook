@@ -92,7 +92,13 @@ func (e *Executor) Execute(ctx context.Context, job *queue.Job) *queue.JobResult
 
 // buildCommand builds the command with variable substitution
 func (e *Executor) buildCommand(job *queue.Job) []string {
-	cmdSlice := e.cfg.Command.AsSlice()
+	// Use job-specific command if set, otherwise fall back to config
+	var cmdSlice []string
+	if len(job.Command) > 0 {
+		cmdSlice = job.Command
+	} else {
+		cmdSlice = e.cfg.Command.AsSlice()
+	}
 	if len(cmdSlice) == 0 {
 		return nil
 	}

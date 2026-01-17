@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dandriscoll/filehook/internal/config"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -16,6 +17,7 @@ type Event struct {
 	Path         string
 	IsModify     bool // true if modification, false if new file
 	DiscoveredAt time.Time
+	Pattern      *config.PatternConfig // the pattern that matched this file
 }
 
 // Watcher watches for file changes
@@ -137,7 +139,8 @@ func (w *Watcher) handleFSEvent(event fsnotify.Event) {
 	}
 
 	// Skip if not a matching file
-	if !w.matcher.Matches(path) {
+	result := w.matcher.MatchWithPattern(path)
+	if !result.Matched {
 		return
 	}
 
@@ -151,11 +154,11 @@ func (w *Watcher) handleFSEvent(event fsnotify.Event) {
 
 	// Handle create/write events
 	if event.Has(fsnotify.Create) || event.Has(fsnotify.Write) {
-		w.debounceEvent(path, isModify)
+		w.debounceEvent(path, isModify, result.Pattern)
 	}
 }
 
-func (w *Watcher) debounceEvent(path string, isModify bool) {
+func (w *Watcher) debounceEvent(path string, isModify bool, pattern *config.PatternConfig) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -175,6 +178,7 @@ func (w *Watcher) debounceEvent(path string, isModify bool) {
 			Path:         path,
 			IsModify:     isModify,
 			DiscoveredAt: time.Now(),
+			Pattern:      pattern,
 		},
 		isModify: isModify,
 	}
@@ -225,7 +229,8 @@ func (w *Watcher) ScanExisting(ctx context.Context, paths []string) error {
 				return nil
 			}
 
-			if w.matcher.Matches(path) {
+			result := w.matcher.MatchWithPattern(path)
+			if result.Matched {
 				w.mu.Lock()
 				seen := w.seenOnce[path]
 				w.seenOnce[path] = true
@@ -235,6 +240,7 @@ func (w *Watcher) ScanExisting(ctx context.Context, paths []string) error {
 					Path:         path,
 					IsModify:     seen, // First scan = not a modification
 					DiscoveredAt: time.Now(),
+					Pattern:      result.Pattern,
 				}
 
 				select {

@@ -51,6 +51,7 @@ func (s *SQLiteStore) Initialize(ctx context.Context) error {
 			output_paths TEXT NOT NULL,
 			status TEXT NOT NULL,
 			group_key TEXT,
+			command TEXT,
 			created_at TEXT NOT NULL,
 			started_at TEXT,
 			completed_at TEXT,
@@ -102,10 +103,20 @@ func (s *SQLiteStore) Enqueue(ctx context.Context, job *Job) error {
 		return fmt.Errorf("failed to marshal output paths: %w", err)
 	}
 
+	var commandJSON *string
+	if len(job.Command) > 0 {
+		b, err := json.Marshal(job.Command)
+		if err != nil {
+			return fmt.Errorf("failed to marshal command: %w", err)
+		}
+		s := string(b)
+		commandJSON = &s
+	}
+
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO jobs (id, input_path, output_paths, status, group_key, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, job.ID, job.InputPath, string(outputPaths), job.Status, job.GroupKey, job.CreatedAt.Format(time.RFC3339Nano))
+		INSERT INTO jobs (id, input_path, output_paths, status, group_key, command, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, job.ID, job.InputPath, string(outputPaths), job.Status, job.GroupKey, commandJSON, job.CreatedAt.Format(time.RFC3339Nano))
 
 	return err
 }
@@ -120,7 +131,7 @@ func (s *SQLiteStore) Dequeue(ctx context.Context) (*Job, error) {
 
 	// Get oldest pending job
 	row := tx.QueryRowContext(ctx, `
-		SELECT id, input_path, output_paths, status, group_key, created_at
+		SELECT id, input_path, output_paths, status, group_key, command, created_at
 		FROM jobs
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -164,7 +175,7 @@ func (s *SQLiteStore) DequeueForGroup(ctx context.Context, groupKey string) (*Jo
 	defer tx.Rollback()
 
 	row := tx.QueryRowContext(ctx, `
-		SELECT id, input_path, output_paths, status, group_key, created_at
+		SELECT id, input_path, output_paths, status, group_key, command, created_at
 		FROM jobs
 		WHERE status = ? AND group_key = ?
 		ORDER BY created_at ASC
@@ -229,7 +240,7 @@ func (s *SQLiteStore) Fail(ctx context.Context, jobID string, result *JobResult)
 // Get retrieves a job by ID
 func (s *SQLiteStore) Get(ctx context.Context, jobID string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, input_path, output_paths, status, group_key, created_at,
+		SELECT id, input_path, output_paths, status, group_key, command, created_at,
 		       started_at, completed_at, exit_code, duration_ms, error, stdout, stderr
 		FROM jobs
 		WHERE id = ?
@@ -241,7 +252,7 @@ func (s *SQLiteStore) Get(ctx context.Context, jobID string) (*Job, error) {
 // GetByInputPath retrieves a pending or running job by input path
 func (s *SQLiteStore) GetByInputPath(ctx context.Context, inputPath string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, input_path, output_paths, status, group_key, created_at,
+		SELECT id, input_path, output_paths, status, group_key, command, created_at,
 		       started_at, completed_at, exit_code, duration_ms, error, stdout, stderr
 		FROM jobs
 		WHERE input_path = ? AND status IN (?, ?)
@@ -439,9 +450,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var job Job
 	var outputPathsJSON string
 	var createdAt string
-	var groupKey sql.NullString
+	var groupKey, commandJSON sql.NullString
 
-	err := row.Scan(&job.ID, &job.InputPath, &outputPathsJSON, &job.Status, &groupKey, &createdAt)
+	err := row.Scan(&job.ID, &job.InputPath, &outputPathsJSON, &job.Status, &groupKey, &commandJSON, &createdAt)
 	if err != nil {
 		return nil, err
 	}
@@ -454,6 +465,11 @@ func scanJob(row *sql.Row) (*Job, error) {
 	if groupKey.Valid {
 		job.GroupKey = groupKey.String
 	}
+	if commandJSON.Valid {
+		if err := json.Unmarshal([]byte(commandJSON.String), &job.Command); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal command: %w", err)
+		}
+	}
 
 	return &job, nil
 }
@@ -463,11 +479,11 @@ func scanFullJob(row *sql.Row) (*Job, error) {
 	var job Job
 	var outputPathsJSON string
 	var createdAt string
-	var groupKey, startedAt, completedAt, errStr, stdout, stderr sql.NullString
+	var groupKey, commandJSON, startedAt, completedAt, errStr, stdout, stderr sql.NullString
 	var exitCode, durationMs sql.NullInt64
 
 	err := row.Scan(
-		&job.ID, &job.InputPath, &outputPathsJSON, &job.Status, &groupKey, &createdAt,
+		&job.ID, &job.InputPath, &outputPathsJSON, &job.Status, &groupKey, &commandJSON, &createdAt,
 		&startedAt, &completedAt, &exitCode, &durationMs, &errStr, &stdout, &stderr,
 	)
 	if err != nil {
@@ -482,6 +498,11 @@ func scanFullJob(row *sql.Row) (*Job, error) {
 
 	if groupKey.Valid {
 		job.GroupKey = groupKey.String
+	}
+	if commandJSON.Valid {
+		if err := json.Unmarshal([]byte(commandJSON.String), &job.Command); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal command: %w", err)
+		}
 	}
 	if startedAt.Valid {
 		t, _ := time.Parse(time.RFC3339Nano, startedAt.String)
