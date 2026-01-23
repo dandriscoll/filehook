@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/dandriscoll/filehook/internal/config"
+	"github.com/dandriscoll/filehook/internal/debug"
 	"github.com/dandriscoll/filehook/internal/plugin"
 	"github.com/dandriscoll/filehook/internal/queue"
 	"github.com/dandriscoll/filehook/internal/watcher"
@@ -48,6 +49,17 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// Setup logger
 	logger := log.New(os.Stdout, "[filehook] ", log.LstdFlags)
 
+	// Setup debug logger
+	debugLogger, err := debug.New(cfg.StateDirectory(), cfg.Debug)
+	if err != nil {
+		return fmt.Errorf("failed to initialize debug logger: %w", err)
+	}
+	defer debugLogger.Close()
+
+	if cfg.Debug {
+		logger.Printf("Debug logging enabled: %s/debug.log", cfg.StateDirectory())
+	}
+
 	// Setup context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -82,13 +94,13 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Initialize plugins
-	namingPlugin, err := plugin.NewNamingPlugin(cfg)
+	namingPlugin, err := plugin.NewNamingPlugin(cfg, debugLogger)
 	if err != nil {
 		return fmt.Errorf("failed to initialize naming plugin: %w", err)
 	}
 
-	shouldProcess := plugin.NewShouldProcessChecker(cfg)
-	groupKeyGen := plugin.NewGroupKeyGenerator(cfg)
+	shouldProcess := plugin.NewShouldProcessChecker(cfg, debugLogger)
+	groupKeyGen := plugin.NewGroupKeyGenerator(cfg, debugLogger)
 
 	// Initialize watcher
 	matcher := watcher.NewMatcherWithFilter(cfg.Inputs.Patterns, cfg.Watch.Ignore, watchPattern)
@@ -116,14 +128,14 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// Start workers
 	var stopWorkers func()
 	if cfg.Concurrency.Mode == config.ConcurrencySequentialSwitch {
-		scheduler, err := worker.NewSequentialScheduler(cfg, store, logger)
+		scheduler, err := worker.NewSequentialScheduler(cfg, store, namingPlugin, debugLogger, logger)
 		if err != nil {
 			return fmt.Errorf("failed to create scheduler: %w", err)
 		}
 		scheduler.Start(ctx)
 		stopWorkers = scheduler.Stop
 	} else {
-		pool, err := worker.NewPool(cfg, store, logger)
+		pool, err := worker.NewPool(cfg, store, namingPlugin, debugLogger, logger)
 		if err != nil {
 			return fmt.Errorf("failed to create worker pool: %w", err)
 		}
@@ -134,14 +146,66 @@ func runWatch(cmd *cobra.Command, args []string) error {
 
 	logger.Printf("Started with %d workers in %s mode", cfg.Concurrency.MaxWorkers, cfg.Concurrency.Mode)
 
-	// Process events
+	// Initial scan of existing files (like run mode)
+	logger.Println("Scanning for existing files...")
+
+	// Process scan events in a goroutine while scanning
+	scanDone := make(chan struct{})
+	scannerStopped := make(chan struct{})
+	go func() {
+		defer close(scannerStopped)
+		for {
+			select {
+			case event, ok := <-w.Events():
+				if !ok {
+					return
+				}
+				if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger); err != nil {
+					logger.Printf("Error processing %s: %v", event.Path, err)
+				}
+			case <-scanDone:
+				// Drain any remaining events from the scan
+				for {
+					select {
+					case event, ok := <-w.Events():
+						if !ok {
+							return
+						}
+						if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger); err != nil {
+							logger.Printf("Error processing %s: %v", event.Path, err)
+						}
+					default:
+						return
+					}
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	if err := w.ScanExisting(ctx, getEffectiveWatchPaths(cfg)); err != nil {
+		logger.Printf("Warning: scan failed: %v", err)
+	}
+	close(scanDone)
+	<-scannerStopped
+
+	// Get stats after scan
+	stats, err := store.GetStats(ctx)
+	if err == nil && stats.Pending > 0 {
+		logger.Printf("Found %d files to process", stats.Pending)
+	}
+
+	logger.Println("Watching for changes...")
+
+	// Continue watching for new events
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 
 		case event := <-w.Events():
-			if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger); err != nil {
+			if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger); err != nil {
 				logger.Printf("Error processing %s: %v", event.Path, err)
 			}
 
@@ -160,37 +224,60 @@ func processEvent(
 	groupKeyGen *plugin.GroupKeyGenerator,
 	event watcher.Event,
 	logger *log.Logger,
+	debugLogger *debug.Logger,
 ) error {
+	eventType := "CREATE"
+	if event.IsModify {
+		eventType = "MODIFY"
+	}
+	debugLogger.Event(eventType, event.Path, fmt.Sprintf("pattern=%v", event.Pattern != nil))
+
 	// Check if already pending/running
 	exists, err := store.HasPendingOrRunning(ctx, event.Path)
 	if err != nil {
 		return fmt.Errorf("failed to check existing job: %w", err)
 	}
 	if exists {
+		debugLogger.Decision(event.Path, "SKIP", "already queued")
 		logger.Printf("Skipping %s: already queued", event.Path)
 		return nil
 	}
 
+	// Get target type from matched pattern
+	targetType := ""
+	if event.Pattern != nil {
+		targetType = event.Pattern.TargetType
+	}
+	debugLogger.Log("Processing %s: targetType=%s, isModify=%v", event.Path, targetType, event.IsModify)
+
 	// Generate output filenames and check readiness
-	// The naming plugin returns both outputs and ready status in one call
-	naming, err := namingPlugin.Generate(ctx, event.Path)
+	// The naming plugin calls "ready" and "propose" operations separately
+	// Note: outputs are calculated here for shouldProcess check, but will be
+	// recalculated at execution time to get fresh values
+	naming, err := namingPlugin.Generate(ctx, event.Path, targetType)
 	if err != nil {
+		debugLogger.Decision(event.Path, "ERROR", fmt.Sprintf("naming plugin failed: %v", err))
 		return fmt.Errorf("naming plugin failed: %w", err)
 	}
+	debugLogger.Log("Naming result: ready=%v, outputs=%v", naming.Ready, naming.Outputs)
 
 	// Check if file is ready for transformation (from naming plugin's "ready" field)
 	if !naming.Ready {
+		debugLogger.Decision(event.Path, "SKIP", "not ready for transformation")
 		logger.Printf("Skipping %s: not ready for transformation", event.Path)
 		return nil
 	}
 
 	// Check if we should process (based on modification policy, NOT readiness)
+	// Use the outputs from naming plugin for timestamp comparison
 	shouldProc, reason, err := shouldProcess.Check(ctx, event.Path, naming.Outputs, event.IsModify)
 	if err != nil {
+		debugLogger.Decision(event.Path, "ERROR", fmt.Sprintf("should_process check failed: %v", err))
 		return fmt.Errorf("should_process check failed: %w", err)
 	}
 
 	if !shouldProc {
+		debugLogger.Decision(event.Path, "SKIP", reason)
 		logger.Printf("Skipping %s: %s", event.Path, reason)
 		return nil
 	}
@@ -211,31 +298,6 @@ func processEvent(
 		}
 	}
 
-	// Handle versioned policy
-	outputs := naming.Outputs
-	if cfg.OnModified == config.ModifiedVersioned && event.IsModify {
-		// Find next version number
-		version := 1
-		for {
-			versioned := worker.VersionedOutputPaths(outputs, version)
-			allExist := true
-			for _, p := range versioned {
-				if _, err := os.Stat(p); os.IsNotExist(err) {
-					allExist = false
-					break
-				}
-			}
-			if !allExist {
-				outputs = versioned
-				break
-			}
-			version++
-			if version > 1000 {
-				return fmt.Errorf("too many versions")
-			}
-		}
-	}
-
 	// Resolve command: use pattern-specific or fall back to global
 	var command []string
 	if event.Pattern != nil && event.Pattern.HasCommand() {
@@ -244,19 +306,21 @@ func processEvent(
 		command = cfg.Command.AsSlice()
 	}
 
-	// Enqueue job
+	// Enqueue job with target type - output paths will be calculated at execution time
 	job := &queue.Job{
-		InputPath:   event.Path,
-		OutputPaths: outputs,
-		GroupKey:    groupKey,
-		Command:     command,
+		InputPath:  event.Path,
+		TargetType: targetType,
+		IsModify:   event.IsModify,
+		GroupKey:   groupKey,
+		Command:    command,
 	}
 
 	if err := store.Enqueue(ctx, job); err != nil {
 		return fmt.Errorf("failed to enqueue: %w", err)
 	}
 
-	logger.Printf("Queued: %s -> %v (reason: %s)", event.Path, outputs, reason)
+	debugLogger.Decision(event.Path, "QUEUED", fmt.Sprintf("targetType=%s, groupKey=%s, reason=%s", targetType, groupKey, reason))
+	logger.Printf("Queued: %s (target_type=%s, reason: %s)", event.Path, targetType, reason)
 	return nil
 }
 

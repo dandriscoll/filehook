@@ -14,6 +14,7 @@ var (
 	directory    string
 	jsonOutput   bool
 	dryRun       bool
+	debugMode    bool
 
 	// Loaded config (set during PreRunE)
 	loadedConfig *config.Config
@@ -45,6 +46,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&directory, "directory", "d", "", "target directory (finds config upward, processes only this dir)")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "output in JSON format")
 	rootCmd.PersistentFlags().BoolVarP(&dryRun, "dry-run", "n", false, "print what would be done without executing")
+	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "enable verbose debug logging to .filehook/debug.log")
 
 	// Make -? work as an alias for -h (help)
 	rootCmd.PersistentFlags().BoolP("help", "?", false, "help for filehook")
@@ -70,6 +72,11 @@ func loadConfig() (*config.Config, error) {
 
 	if err != nil {
 		return nil, err
+	}
+
+	// Apply --debug flag (overrides config file setting)
+	if debugMode {
+		cfg.Debug = true
 	}
 
 	loadedConfig = cfg

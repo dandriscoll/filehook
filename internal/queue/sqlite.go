@@ -48,7 +48,8 @@ func (s *SQLiteStore) Initialize(ctx context.Context) error {
 		CREATE TABLE IF NOT EXISTS jobs (
 			id TEXT PRIMARY KEY,
 			input_path TEXT NOT NULL,
-			output_paths TEXT NOT NULL,
+			target_type TEXT,
+			is_modify INTEGER DEFAULT 0,
 			status TEXT NOT NULL,
 			group_key TEXT,
 			command TEXT,
@@ -69,7 +70,23 @@ func (s *SQLiteStore) Initialize(ctx context.Context) error {
 	`
 
 	_, err := s.db.ExecContext(ctx, schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Migration: add target_type and is_modify columns if they don't exist
+	// Also drop output_paths column if it exists (data migration not needed as outputs are now calculated at runtime)
+	migrations := []string{
+		"ALTER TABLE jobs ADD COLUMN target_type TEXT",
+		"ALTER TABLE jobs ADD COLUMN is_modify INTEGER DEFAULT 0",
+	}
+
+	for _, migration := range migrations {
+		// Ignore errors - column may already exist
+		s.db.ExecContext(ctx, migration)
+	}
+
+	return nil
 }
 
 // Close closes the database connection
@@ -98,11 +115,6 @@ func (s *SQLiteStore) Enqueue(ctx context.Context, job *Job) error {
 		job.Status = JobStatusPending
 	}
 
-	outputPaths, err := json.Marshal(job.OutputPaths)
-	if err != nil {
-		return fmt.Errorf("failed to marshal output paths: %w", err)
-	}
-
 	var commandJSON *string
 	if len(job.Command) > 0 {
 		b, err := json.Marshal(job.Command)
@@ -113,10 +125,20 @@ func (s *SQLiteStore) Enqueue(ctx context.Context, job *Job) error {
 		commandJSON = &s
 	}
 
+	var targetType *string
+	if job.TargetType != "" {
+		targetType = &job.TargetType
+	}
+
+	isModify := 0
+	if job.IsModify {
+		isModify = 1
+	}
+
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO jobs (id, input_path, output_paths, status, group_key, command, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, job.ID, job.InputPath, string(outputPaths), job.Status, job.GroupKey, commandJSON, job.CreatedAt.Format(time.RFC3339Nano))
+		INSERT INTO jobs (id, input_path, target_type, is_modify, status, group_key, command, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, job.ID, job.InputPath, targetType, isModify, job.Status, job.GroupKey, commandJSON, job.CreatedAt.Format(time.RFC3339Nano))
 
 	return err
 }
@@ -131,7 +153,7 @@ func (s *SQLiteStore) Dequeue(ctx context.Context) (*Job, error) {
 
 	// Get oldest pending job
 	row := tx.QueryRowContext(ctx, `
-		SELECT id, input_path, output_paths, status, group_key, command, created_at
+		SELECT id, input_path, target_type, is_modify, status, group_key, command, created_at
 		FROM jobs
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -175,7 +197,7 @@ func (s *SQLiteStore) DequeueForGroup(ctx context.Context, groupKey string) (*Jo
 	defer tx.Rollback()
 
 	row := tx.QueryRowContext(ctx, `
-		SELECT id, input_path, output_paths, status, group_key, command, created_at
+		SELECT id, input_path, target_type, is_modify, status, group_key, command, created_at
 		FROM jobs
 		WHERE status = ? AND group_key = ?
 		ORDER BY created_at ASC
@@ -240,7 +262,7 @@ func (s *SQLiteStore) Fail(ctx context.Context, jobID string, result *JobResult)
 // Get retrieves a job by ID
 func (s *SQLiteStore) Get(ctx context.Context, jobID string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, input_path, output_paths, status, group_key, command, created_at,
+		SELECT id, input_path, target_type, is_modify, status, group_key, command, created_at,
 		       started_at, completed_at, exit_code, duration_ms, error, stdout, stderr
 		FROM jobs
 		WHERE id = ?
@@ -252,7 +274,7 @@ func (s *SQLiteStore) Get(ctx context.Context, jobID string) (*Job, error) {
 // GetByInputPath retrieves a pending or running job by input path
 func (s *SQLiteStore) GetByInputPath(ctx context.Context, inputPath string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, input_path, output_paths, status, group_key, command, created_at,
+		SELECT id, input_path, target_type, is_modify, status, group_key, command, created_at,
 		       started_at, completed_at, exit_code, duration_ms, error, stdout, stderr
 		FROM jobs
 		WHERE input_path = ? AND status IN (?, ?)
@@ -448,20 +470,20 @@ func (s *SQLiteStore) CleanupStaleRunning(ctx context.Context) (int, error) {
 // scanJob scans basic job fields from a row
 func scanJob(row *sql.Row) (*Job, error) {
 	var job Job
-	var outputPathsJSON string
 	var createdAt string
-	var groupKey, commandJSON sql.NullString
+	var isModify int
+	var targetType, groupKey, commandJSON sql.NullString
 
-	err := row.Scan(&job.ID, &job.InputPath, &outputPathsJSON, &job.Status, &groupKey, &commandJSON, &createdAt)
+	err := row.Scan(&job.ID, &job.InputPath, &targetType, &isModify, &job.Status, &groupKey, &commandJSON, &createdAt)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := json.Unmarshal([]byte(outputPathsJSON), &job.OutputPaths); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal output paths: %w", err)
-	}
-
 	job.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	job.IsModify = isModify != 0
+	if targetType.Valid {
+		job.TargetType = targetType.String
+	}
 	if groupKey.Valid {
 		job.GroupKey = groupKey.String
 	}
@@ -477,25 +499,25 @@ func scanJob(row *sql.Row) (*Job, error) {
 // scanFullJob scans all job fields from a row
 func scanFullJob(row *sql.Row) (*Job, error) {
 	var job Job
-	var outputPathsJSON string
 	var createdAt string
-	var groupKey, commandJSON, startedAt, completedAt, errStr, stdout, stderr sql.NullString
+	var isModify int
+	var targetType, groupKey, commandJSON, startedAt, completedAt, errStr, stdout, stderr sql.NullString
 	var exitCode, durationMs sql.NullInt64
 
 	err := row.Scan(
-		&job.ID, &job.InputPath, &outputPathsJSON, &job.Status, &groupKey, &commandJSON, &createdAt,
+		&job.ID, &job.InputPath, &targetType, &isModify, &job.Status, &groupKey, &commandJSON, &createdAt,
 		&startedAt, &completedAt, &exitCode, &durationMs, &errStr, &stdout, &stderr,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := json.Unmarshal([]byte(outputPathsJSON), &job.OutputPaths); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal output paths: %w", err)
-	}
-
 	job.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	job.IsModify = isModify != 0
 
+	if targetType.Valid {
+		job.TargetType = targetType.String
+	}
 	if groupKey.Valid {
 		job.GroupKey = groupKey.String
 	}

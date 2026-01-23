@@ -12,25 +12,31 @@ import (
 	"time"
 
 	"github.com/dandriscoll/filehook/internal/config"
+	"github.com/dandriscoll/filehook/internal/debug"
+	"github.com/dandriscoll/filehook/internal/plugin"
 	"github.com/dandriscoll/filehook/internal/queue"
 )
 
 // Executor runs jobs
 type Executor struct {
-	cfg     *config.Config
-	tempDir string
+	cfg          *config.Config
+	namingPlugin *plugin.NamingPlugin
+	debugLogger  *debug.Logger
+	tempDir      string
 }
 
 // NewExecutor creates a new executor
-func NewExecutor(cfg *config.Config) (*Executor, error) {
+func NewExecutor(cfg *config.Config, namingPlugin *plugin.NamingPlugin, debugLogger *debug.Logger) (*Executor, error) {
 	tempDir := filepath.Join(cfg.StateDirectory(), "tmp")
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 
 	return &Executor{
-		cfg:     cfg,
-		tempDir: tempDir,
+		cfg:          cfg,
+		namingPlugin: namingPlugin,
+		debugLogger:  debugLogger,
+		tempDir:      tempDir,
 	}, nil
 }
 
@@ -38,24 +44,76 @@ func NewExecutor(cfg *config.Config) (*Executor, error) {
 func (e *Executor) Execute(ctx context.Context, job *queue.Job) *queue.JobResult {
 	start := time.Now()
 
+	e.debugLogger.JobStart(job.ID, job.InputPath, job.TargetType, job.Command)
+
+	// Calculate output paths at execution time using the naming plugin
+	outputs, err := e.namingPlugin.Propose(ctx, job.InputPath, job.TargetType)
+	if err != nil {
+		result := &queue.JobResult{
+			ExitCode:   1,
+			DurationMs: time.Since(start).Milliseconds(),
+			Error:      fmt.Errorf("failed to calculate output paths: %w", err),
+		}
+		e.debugLogger.JobEnd(job.ID, result.ExitCode, time.Since(start), "", "", result.Error)
+		return result
+	}
+	e.debugLogger.Log("Job %s: calculated outputs=%v", job.ID, outputs)
+
+	// Handle versioned policy at execution time
+	if e.cfg.OnModified == config.ModifiedVersioned && job.IsModify {
+		version := 1
+		for {
+			versioned := VersionedOutputPaths(outputs, version)
+			allExist := true
+			for _, p := range versioned {
+				if _, err := os.Stat(p); os.IsNotExist(err) {
+					allExist = false
+					break
+				}
+			}
+			if !allExist {
+				outputs = versioned
+				e.debugLogger.Log("Job %s: using versioned outputs (v%d)=%v", job.ID, version, outputs)
+				break
+			}
+			version++
+			if version > 1000 {
+				result := &queue.JobResult{
+					ExitCode:   1,
+					DurationMs: time.Since(start).Milliseconds(),
+					Error:      fmt.Errorf("too many versions"),
+				}
+				e.debugLogger.JobEnd(job.ID, result.ExitCode, time.Since(start), "", "", result.Error)
+				return result
+			}
+		}
+	}
+
+	job.OutputPaths = outputs
+
 	// Build the command
 	cmdArgs := e.buildCommand(job)
 	if len(cmdArgs) == 0 {
-		return &queue.JobResult{
+		result := &queue.JobResult{
 			ExitCode: 1,
 			Error:    fmt.Errorf("empty command"),
 		}
+		e.debugLogger.JobEnd(job.ID, result.ExitCode, time.Since(start), "", "", result.Error)
+		return result
 	}
+	e.debugLogger.Log("Job %s: executing command=%v", job.ID, cmdArgs)
 
 	// Ensure output directories exist
 	for _, outPath := range job.OutputPaths {
 		outDir := filepath.Dir(outPath)
 		if err := os.MkdirAll(outDir, 0755); err != nil {
-			return &queue.JobResult{
+			result := &queue.JobResult{
 				ExitCode:   1,
 				DurationMs: time.Since(start).Milliseconds(),
 				Error:      fmt.Errorf("failed to create output directory: %w", err),
 			}
+			e.debugLogger.JobEnd(job.ID, result.ExitCode, time.Since(start), "", "", result.Error)
+			return result
 		}
 	}
 
@@ -68,7 +126,7 @@ func (e *Executor) Execute(ctx context.Context, job *queue.Job) *queue.JobResult
 	cmd.Stderr = &stderr
 	cmd.Env = e.buildEnv(job)
 
-	err := cmd.Run()
+	err = cmd.Run()
 	duration := time.Since(start)
 
 	result := &queue.JobResult{
@@ -87,6 +145,7 @@ func (e *Executor) Execute(ctx context.Context, job *queue.Job) *queue.JobResult
 		}
 	}
 
+	e.debugLogger.JobEnd(job.ID, result.ExitCode, duration, result.Stdout, result.Stderr, result.Error)
 	return result
 }
 

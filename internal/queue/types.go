@@ -18,7 +18,9 @@ const (
 type Job struct {
 	ID          string     `json:"id"`
 	InputPath   string     `json:"input_path"`
-	OutputPaths []string   `json:"output_paths"`
+	OutputPaths []string   `json:"output_paths"` // Calculated at execution time, not stored in DB
+	TargetType  string     `json:"target_type,omitempty"`
+	IsModify    bool       `json:"is_modify,omitempty"` // True if this was a file modification event
 	Status      JobStatus  `json:"status"`
 	GroupKey    string     `json:"group_key,omitempty"`
 	Command     []string   `json:"command,omitempty"`

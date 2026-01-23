@@ -2,18 +2,13 @@ package plugin
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/dandriscoll/filehook/internal/config"
+	"github.com/dandriscoll/filehook/internal/debug"
 )
-
-// NamingOutput is the expected JSON output from the naming plugin
-type NamingOutput struct {
-	Outputs []string `json:"outputs"`
-	Ready   *bool    `json:"ready,omitempty"` // Optional: if false, file is not ready for processing
-}
 
 // NamingResult contains both the generated outputs and the ready status
 type NamingResult struct {
@@ -21,13 +16,12 @@ type NamingResult struct {
 	Ready   bool     // Whether the file is ready for processing (defaults to true if not specified)
 }
 
-// NamingPlugin wraps the naming plugin which handles both filename generation
-// and readiness checks. These are combined because they're closely related -
-// both depend on understanding the external source state.
+// NamingPlugin wraps the naming plugin which handles filename generation
+// and readiness checks via separate operations.
 //
-// The plugin returns JSON with:
-//   - "outputs": array of output filenames (required)
-//   - "ready": boolean indicating if file is ready (optional, defaults to true)
+// The plugin follows the ft tool contract:
+//   - "ready <path>" returns "true" or "false" (plain text)
+//   - "propose <path> <type>" returns the proposed output filename (plain text)
 //
 // NOTE: The "ready" check is NOT the same as ShouldProcessChecker.
 // Ready asks "is the external source ready?" (e.g., is upstream done writing?)
@@ -38,60 +32,77 @@ type NamingPlugin struct {
 }
 
 // NewNamingPlugin creates a new naming plugin wrapper
-func NewNamingPlugin(cfg *config.Config) (*NamingPlugin, error) {
+func NewNamingPlugin(cfg *config.Config, debugLogger *debug.Logger) (*NamingPlugin, error) {
 	if cfg.Plugins.Naming == nil {
 		return nil, fmt.Errorf("naming plugin not configured")
 	}
 
 	pluginPath := cfg.ResolvePath(cfg.Plugins.Naming.Path)
+	runner := NewRunner(pluginPath, cfg.Plugins.Naming.Args, cfg.ConfigDir)
+	if debugLogger != nil {
+		runner.WithDebugLogger(debugLogger)
+	}
 
 	return &NamingPlugin{
-		runner:     NewRunner(pluginPath, cfg.Plugins.Naming.Args, cfg.ConfigDir),
+		runner:     runner,
 		outputRoot: cfg.OutputRoot(),
 	}, nil
 }
 
 // Generate calls the plugin to generate output filenames and check readiness for an input file.
-// Returns outputs and ready status. If the plugin doesn't specify "ready", it defaults to true.
-func (np *NamingPlugin) Generate(ctx context.Context, inputPath string) (*NamingResult, error) {
-	result, err := np.runner.Run(ctx, inputPath)
+// targetType specifies the output type (e.g., "png", "sdxl") for the naming plugin.
+// Returns outputs and ready status.
+func (np *NamingPlugin) Generate(ctx context.Context, inputPath string, targetType string) (*NamingResult, error) {
+	// First, check if file is ready using "ready <path>"
+	readyResult, err := np.runner.Run(ctx, "ready", inputPath)
 	if err != nil {
-		return nil, fmt.Errorf("plugin execution failed: %w", err)
+		return nil, fmt.Errorf("ready check failed: %w", err)
 	}
 
-	if result.ExitCode != 0 {
-		return nil, fmt.Errorf("plugin failed with exit code %d: %s", result.ExitCode, result.Stderr)
+	if readyResult.ExitCode != 0 {
+		return nil, fmt.Errorf("ready check failed with exit code %d: %s", readyResult.ExitCode, readyResult.Stderr)
 	}
 
-	var output NamingOutput
-	if err := json.Unmarshal([]byte(result.Stdout), &output); err != nil {
-		return nil, fmt.Errorf("failed to parse plugin output: %w (output: %s)", err, result.Stdout)
-	}
+	ready := strings.TrimSpace(readyResult.Stdout) == "true"
 
-	if len(output.Outputs) == 0 {
-		return nil, fmt.Errorf("plugin returned no outputs")
-	}
-
-	// Resolve relative paths against output root
-	resolved := make([]string, len(output.Outputs))
-	for i, p := range output.Outputs {
-		if filepath.IsAbs(p) {
-			resolved[i] = p
-		} else {
-			resolved[i] = filepath.Join(np.outputRoot, p)
-		}
-	}
-
-	// Default ready to true if not specified
-	ready := true
-	if output.Ready != nil {
-		ready = *output.Ready
+	// Then, get proposed output filename using "propose <path> <type>"
+	outputs, err := np.Propose(ctx, inputPath, targetType)
+	if err != nil {
+		return nil, err
 	}
 
 	return &NamingResult{
-		Outputs: resolved,
+		Outputs: outputs,
 		Ready:   ready,
 	}, nil
+}
+
+// Propose calls the plugin to get output filenames for an input file.
+// This is called at execution time to calculate the actual output paths.
+func (np *NamingPlugin) Propose(ctx context.Context, inputPath string, targetType string) ([]string, error) {
+	proposeResult, err := np.runner.Run(ctx, "propose", inputPath, targetType)
+	if err != nil {
+		return nil, fmt.Errorf("propose failed: %w", err)
+	}
+
+	if proposeResult.ExitCode != 0 {
+		return nil, fmt.Errorf("propose failed with exit code %d: %s", proposeResult.ExitCode, proposeResult.Stderr)
+	}
+
+	proposedPath := strings.TrimSpace(proposeResult.Stdout)
+	if proposedPath == "" {
+		return nil, fmt.Errorf("propose returned empty output")
+	}
+
+	// Resolve relative paths against output root
+	var resolved string
+	if filepath.IsAbs(proposedPath) {
+		resolved = proposedPath
+	} else {
+		resolved = filepath.Join(np.outputRoot, proposedPath)
+	}
+
+	return []string{resolved}, nil
 }
 
 // GroupKeyGenerator wraps the group key plugin
@@ -100,15 +111,19 @@ type GroupKeyGenerator struct {
 }
 
 // NewGroupKeyGenerator creates a new group key plugin wrapper
-func NewGroupKeyGenerator(cfg *config.Config) *GroupKeyGenerator {
+func NewGroupKeyGenerator(cfg *config.Config, debugLogger *debug.Logger) *GroupKeyGenerator {
 	if cfg.Plugins.GroupKey == nil {
 		return nil
 	}
 
 	pluginPath := cfg.ResolvePath(cfg.Plugins.GroupKey.Path)
+	runner := NewRunner(pluginPath, cfg.Plugins.GroupKey.Args, cfg.ConfigDir)
+	if debugLogger != nil {
+		runner.WithDebugLogger(debugLogger)
+	}
 
 	return &GroupKeyGenerator{
-		runner: NewRunner(pluginPath, cfg.Plugins.GroupKey.Args, cfg.ConfigDir),
+		runner: runner,
 	}
 }
 

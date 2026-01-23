@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/dandriscoll/filehook/internal/config"
+	"github.com/dandriscoll/filehook/internal/debug"
 	"github.com/dandriscoll/filehook/internal/plugin"
 	"github.com/dandriscoll/filehook/internal/queue"
 	"github.com/dandriscoll/filehook/internal/watcher"
@@ -51,6 +52,17 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Setup logger
 	logger := log.New(os.Stdout, "[filehook] ", log.LstdFlags)
 
+	// Setup debug logger
+	debugLogger, err := debug.New(cfg.StateDirectory(), cfg.Debug)
+	if err != nil {
+		return fmt.Errorf("failed to initialize debug logger: %w", err)
+	}
+	defer debugLogger.Close()
+
+	if cfg.Debug {
+		logger.Printf("Debug logging enabled: %s/debug.log", cfg.StateDirectory())
+	}
+
 	// Setup context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -85,13 +97,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	// Initialize plugins
-	namingPlugin, err := plugin.NewNamingPlugin(cfg)
+	namingPlugin, err := plugin.NewNamingPlugin(cfg, debugLogger)
 	if err != nil {
 		return fmt.Errorf("failed to initialize naming plugin: %w", err)
 	}
 
-	shouldProcess := plugin.NewShouldProcessChecker(cfg)
-	groupKeyGen := plugin.NewGroupKeyGenerator(cfg)
+	shouldProcess := plugin.NewShouldProcessChecker(cfg, debugLogger)
+	groupKeyGen := plugin.NewGroupKeyGenerator(cfg, debugLogger)
 
 	// Create matcher for scanning
 	matcher := watcher.NewMatcherWithFilter(cfg.Inputs.Patterns, cfg.Watch.Ignore, runPattern)
@@ -115,7 +127,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	go func() {
 		defer close(eventsDone)
 		for event := range w.Events() {
-			if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger); err != nil {
+			if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger); err != nil {
 				logger.Printf("Error processing %s: %v", event.Path, err)
 			}
 		}
@@ -146,14 +158,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Handle --run-one mode
 	if runOne {
 		logger.Println("Processing one job (--run-one mode)...")
-		return runOneJob(ctx, cfg, store, logger)
+		return runOneJob(ctx, cfg, store, namingPlugin, debugLogger, logger)
 	}
 
 	// Process all jobs
 	logger.Println("Processing jobs...")
 
 	if cfg.Concurrency.Mode == config.ConcurrencySequentialSwitch {
-		scheduler, err := worker.NewSequentialScheduler(cfg, store, logger)
+		scheduler, err := worker.NewSequentialScheduler(cfg, store, namingPlugin, debugLogger, logger)
 		if err != nil {
 			return fmt.Errorf("failed to create scheduler: %w", err)
 		}
@@ -161,7 +173,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	} else {
-		pool, err := worker.NewPool(cfg, store, logger)
+		pool, err := worker.NewPool(cfg, store, namingPlugin, debugLogger, logger)
 		if err != nil {
 			return fmt.Errorf("failed to create worker pool: %w", err)
 		}
@@ -218,13 +230,13 @@ func runDryRun(cfg *config.Config) error {
 
 	ctx := context.Background()
 
-	// Initialize plugins
-	namingPlugin, err := plugin.NewNamingPlugin(cfg)
+	// Initialize plugins (no debug logger for dry-run)
+	namingPlugin, err := plugin.NewNamingPlugin(cfg, nil)
 	if err != nil {
 		return fmt.Errorf("failed to initialize naming plugin: %w", err)
 	}
 
-	shouldProcess := plugin.NewShouldProcessChecker(cfg)
+	shouldProcess := plugin.NewShouldProcessChecker(cfg, nil)
 
 	// Create matcher for scanning
 	matcher := watcher.NewMatcherWithFilter(cfg.Inputs.Patterns, cfg.Watch.Ignore, runPattern)
@@ -303,8 +315,14 @@ func buildDryRunJob(
 	shouldProcess *plugin.ShouldProcessChecker,
 	event watcher.Event,
 ) (dryRunJob, bool, string) {
+	// Get target type from matched pattern
+	targetType := ""
+	if event.Pattern != nil {
+		targetType = event.Pattern.TargetType
+	}
+
 	// Generate output filenames and check readiness
-	naming, err := namingPlugin.Generate(ctx, event.Path)
+	naming, err := namingPlugin.Generate(ctx, event.Path, targetType)
 	if err != nil {
 		return dryRunJob{}, true, fmt.Sprintf("naming plugin failed: %v", err)
 	}
@@ -351,9 +369,9 @@ func buildDryRunJob(
 }
 
 // runOneJob dequeues and executes a single job
-func runOneJob(ctx context.Context, cfg *config.Config, store queue.Store, logger *log.Logger) error {
+func runOneJob(ctx context.Context, cfg *config.Config, store queue.Store, namingPlugin *plugin.NamingPlugin, debugLogger *debug.Logger, logger *log.Logger) error {
 	// Create executor
-	executor, err := worker.NewExecutor(cfg)
+	executor, err := worker.NewExecutor(cfg, namingPlugin, debugLogger)
 	if err != nil {
 		return fmt.Errorf("failed to create executor: %w", err)
 	}

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/dandriscoll/filehook/internal/config"
+	"github.com/dandriscoll/filehook/internal/debug"
+	"github.com/dandriscoll/filehook/internal/plugin"
 	"github.com/dandriscoll/filehook/internal/queue"
 )
 
@@ -23,8 +25,8 @@ type Pool struct {
 }
 
 // NewPool creates a new worker pool
-func NewPool(cfg *config.Config, store queue.Store, logger *log.Logger) (*Pool, error) {
-	executor, err := NewExecutor(cfg)
+func NewPool(cfg *config.Config, store queue.Store, namingPlugin *plugin.NamingPlugin, debugLogger *debug.Logger, logger *log.Logger) (*Pool, error) {
+	executor, err := NewExecutor(cfg, namingPlugin, debugLogger)
 	if err != nil {
 		return nil, err
 	}

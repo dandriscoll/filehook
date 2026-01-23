@@ -77,7 +77,13 @@ func (f *Formatter) PrintJob(job *queue.Job) error {
 
 	fmt.Fprintf(f.writer, "Job: %s\n", job.ID)
 	fmt.Fprintf(f.writer, "  Input:    %s\n", job.InputPath)
-	fmt.Fprintf(f.writer, "  Outputs:  %s\n", strings.Join(job.OutputPaths, ", "))
+	if len(job.OutputPaths) > 0 {
+		fmt.Fprintf(f.writer, "  Outputs:  %s\n", strings.Join(job.OutputPaths, ", "))
+	} else if job.TargetType != "" {
+		fmt.Fprintf(f.writer, "  Target:   %s (outputs calculated at execution time)\n", job.TargetType)
+	} else {
+		fmt.Fprintf(f.writer, "  Outputs:  (calculated at execution time)\n")
+	}
 	fmt.Fprintf(f.writer, "  Status:   %s\n", job.Status)
 	if job.GroupKey != "" {
 		fmt.Fprintf(f.writer, "  Group:    %s\n", job.GroupKey)

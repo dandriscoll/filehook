@@ -14,8 +14,10 @@ inputs:
     # Named patterns can be targeted with --pattern / -p flag
     - name: text
       pattern: "*.txt"
+      target_type: upper  # target type for naming plugin (ft propose)
     - name: markdown
       pattern: "*.md"
+      target_type: upper
     # Unnamed patterns still work (matched when no filter is active)
     # - "*.log"
 
@@ -27,9 +29,10 @@ outputs:
 command: ["sh", "-c", "cat {{input}} | tr 'a-z' 'A-Z' > {{output}}"]
 
 plugins:
-  # Naming plugin returns JSON: {"outputs": ["out.txt"], "ready": true}
-  # - outputs: generated output filenames
-  # - ready: if false, file is skipped (defaults to true)
+  # Naming plugin follows the ft tool contract:
+  # - "ready <path>" returns "true" or "false" (plain text)
+  # - "propose <path> <type>" returns the proposed output filename (plain text)
+  # The target type comes from the pattern's target_type field.
   naming:
     path: ./plugins/naming.sh
     args: []

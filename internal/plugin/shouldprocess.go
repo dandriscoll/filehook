@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dandriscoll/filehook/internal/config"
+	"github.com/dandriscoll/filehook/internal/debug"
 )
 
 // ShouldProcessInput is the JSON input for the should_process plugin
@@ -43,11 +44,14 @@ type ShouldProcessChecker struct {
 }
 
 // NewShouldProcessChecker creates a new should_process plugin wrapper
-func NewShouldProcessChecker(cfg *config.Config) *ShouldProcessChecker {
+func NewShouldProcessChecker(cfg *config.Config, debugLogger *debug.Logger) *ShouldProcessChecker {
 	var runner *Runner
 	if cfg.Plugins.ShouldProcess != nil {
 		pluginPath := cfg.ResolvePath(cfg.Plugins.ShouldProcess.Path)
 		runner = NewRunner(pluginPath, cfg.Plugins.ShouldProcess.Args, cfg.ConfigDir)
+		if debugLogger != nil {
+			runner.WithDebugLogger(debugLogger)
+		}
 	}
 
 	return &ShouldProcessChecker{

@@ -16,6 +16,7 @@ type Config struct {
 	Concurrency ConcurrencyConfig `yaml:"concurrency"`
 	OnModified  ModifiedPolicy    `yaml:"on_modified"`
 	StateDir    string            `yaml:"state_dir"`
+	Debug       bool              `yaml:"debug"` // Enable verbose debug logging to .filehook/debug.log
 
 	// ConfigPath is the absolute path to the config file (set during load)
 	ConfigPath string `yaml:"-"`
@@ -45,10 +46,11 @@ type InputsConfig struct {
 
 // PatternConfig defines a single input pattern with optional exclusions and command
 type PatternConfig struct {
-	Name    string         `yaml:"name"`    // optional pattern name for CLI targeting
-	Pattern string         `yaml:"pattern"`
-	Exclude []string       `yaml:"exclude"`
-	Command *CommandConfig `yaml:"command,omitempty"`
+	Name       string         `yaml:"name"`        // optional pattern name for CLI targeting
+	Pattern    string         `yaml:"pattern"`
+	Exclude    []string       `yaml:"exclude"`
+	Command    *CommandConfig `yaml:"command,omitempty"`
+	TargetType string         `yaml:"target_type"` // target type for naming plugin (e.g., "png", "sdxl")
 }
 
 // HasCommand returns true if this pattern has its own command
@@ -65,14 +67,16 @@ func (p *PatternConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		p.Pattern = s
 		p.Exclude = nil
 		p.Command = nil
+		p.TargetType = ""
 		return nil
 	}
 	// Try object format
 	type patternConfigRaw struct {
-		Name    string         `yaml:"name"`
-		Pattern string         `yaml:"pattern"`
-		Exclude []string       `yaml:"exclude"`
-		Command *CommandConfig `yaml:"command"`
+		Name       string         `yaml:"name"`
+		Pattern    string         `yaml:"pattern"`
+		Exclude    []string       `yaml:"exclude"`
+		Command    *CommandConfig `yaml:"command"`
+		TargetType string         `yaml:"target_type"`
 	}
 	var raw patternConfigRaw
 	if err := unmarshal(&raw); err != nil {
@@ -82,6 +86,7 @@ func (p *PatternConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	p.Pattern = raw.Pattern
 	p.Exclude = raw.Exclude
 	p.Command = raw.Command
+	p.TargetType = raw.TargetType
 	return nil
 }
 
