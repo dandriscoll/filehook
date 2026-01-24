@@ -44,6 +44,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Validate pattern filter if specified
+	if err := validatePatternFilter(cfg, runPattern); err != nil {
+		return err
+	}
+
 	// In dry-run mode, use a simplified flow
 	if isDryRun() {
 		return runDryRun(cfg)

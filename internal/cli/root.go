@@ -128,3 +128,30 @@ func getEffectiveWatchPaths(cfg *config.Config) []string {
 	}
 	return cfg.WatchPaths()
 }
+
+// validatePatternFilter checks that the given pattern name exists in the config.
+// Returns an error if the pattern filter is specified but doesn't match any pattern.
+func validatePatternFilter(cfg *config.Config, patternFilter string) error {
+	if patternFilter == "" {
+		return nil
+	}
+
+	for _, p := range cfg.Inputs.Patterns {
+		if p.Name == patternFilter {
+			return nil
+		}
+	}
+
+	// Build a list of available pattern names for the error message
+	var names []string
+	for _, p := range cfg.Inputs.Patterns {
+		if p.Name != "" {
+			names = append(names, p.Name)
+		}
+	}
+
+	if len(names) == 0 {
+		return fmt.Errorf("pattern %q not found: no named patterns defined in config", patternFilter)
+	}
+	return fmt.Errorf("pattern %q not found, available patterns: %v", patternFilter, names)
+}

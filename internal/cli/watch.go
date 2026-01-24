@@ -41,6 +41,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Validate pattern filter if specified
+	if err := validatePatternFilter(cfg, watchPattern); err != nil {
+		return err
+	}
+
 	// In dry-run mode, show what would be watched
 	if isDryRun() {
 		return watchDryRun(cfg)
