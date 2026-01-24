@@ -176,3 +176,20 @@ func formatDuration(d time.Duration) string {
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
+
+// StackStatusData holds stack status for JSON output
+type StackStatusData struct {
+	Mode            string                `json:"mode"`
+	CurrentStack    string                `json:"current_stack"`
+	PendingByStack  map[string]int        `json:"pending_by_stack,omitempty"`
+	StackStatistics []queue.StackStats    `json:"stack_statistics,omitempty"`
+}
+
+// PrintStackStatus prints stack status information
+func (f *Formatter) PrintStackStatus(data *StackStatusData) error {
+	if f.json {
+		return f.printJSON(data)
+	}
+	// Non-JSON output is handled directly in the status command
+	return nil
+}

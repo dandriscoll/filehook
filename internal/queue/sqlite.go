@@ -52,6 +52,7 @@ func (s *SQLiteStore) Initialize(ctx context.Context) error {
 			is_modify INTEGER DEFAULT 0,
 			status TEXT NOT NULL,
 			group_key TEXT,
+			stack_name TEXT,
 			command TEXT,
 			created_at TEXT NOT NULL,
 			started_at TEXT,
@@ -67,6 +68,24 @@ func (s *SQLiteStore) Initialize(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_jobs_group_key ON jobs(group_key);
 		CREATE INDEX IF NOT EXISTS idx_jobs_input_path ON jobs(input_path);
 		CREATE INDEX IF NOT EXISTS idx_jobs_input_status ON jobs(input_path, status);
+		CREATE INDEX IF NOT EXISTS idx_jobs_stack_status ON jobs(stack_name, status);
+
+		-- Stack state table (singleton)
+		CREATE TABLE IF NOT EXISTS stack_state (
+			id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+			current_stack TEXT,
+			last_switch_at TEXT,
+			last_switch_duration_ms INTEGER
+		);
+
+		-- Per-stack statistics
+		CREATE TABLE IF NOT EXISTS stack_stats (
+			stack_name TEXT PRIMARY KEY,
+			job_count INTEGER DEFAULT 0,
+			total_job_duration_ms INTEGER DEFAULT 0,
+			switch_count INTEGER DEFAULT 0,
+			total_switch_duration_ms INTEGER DEFAULT 0
+		);
 	`
 
 	_, err := s.db.ExecContext(ctx, schema)
@@ -74,17 +93,20 @@ func (s *SQLiteStore) Initialize(ctx context.Context) error {
 		return err
 	}
 
-	// Migration: add target_type and is_modify columns if they don't exist
-	// Also drop output_paths column if it exists (data migration not needed as outputs are now calculated at runtime)
+	// Migration: add columns if they don't exist
 	migrations := []string{
 		"ALTER TABLE jobs ADD COLUMN target_type TEXT",
 		"ALTER TABLE jobs ADD COLUMN is_modify INTEGER DEFAULT 0",
+		"ALTER TABLE jobs ADD COLUMN stack_name TEXT",
 	}
 
 	for _, migration := range migrations {
 		// Ignore errors - column may already exist
 		s.db.ExecContext(ctx, migration)
 	}
+
+	// Create index for stack_name if it doesn't exist
+	s.db.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS idx_jobs_stack_status ON jobs(stack_name, status)")
 
 	return nil
 }
@@ -130,15 +152,20 @@ func (s *SQLiteStore) Enqueue(ctx context.Context, job *Job) error {
 		targetType = &job.TargetType
 	}
 
+	var stackName *string
+	if job.StackName != "" {
+		stackName = &job.StackName
+	}
+
 	isModify := 0
 	if job.IsModify {
 		isModify = 1
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO jobs (id, input_path, target_type, is_modify, status, group_key, command, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, job.ID, job.InputPath, targetType, isModify, job.Status, job.GroupKey, commandJSON, job.CreatedAt.Format(time.RFC3339Nano))
+		INSERT INTO jobs (id, input_path, target_type, is_modify, status, group_key, stack_name, command, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, job.ID, job.InputPath, targetType, isModify, job.Status, job.GroupKey, stackName, commandJSON, job.CreatedAt.Format(time.RFC3339Nano))
 
 	return err
 }
@@ -153,7 +180,7 @@ func (s *SQLiteStore) Dequeue(ctx context.Context) (*Job, error) {
 
 	// Get oldest pending job
 	row := tx.QueryRowContext(ctx, `
-		SELECT id, input_path, target_type, is_modify, status, group_key, command, created_at
+		SELECT id, input_path, target_type, is_modify, status, group_key, stack_name, command, created_at
 		FROM jobs
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -197,7 +224,7 @@ func (s *SQLiteStore) DequeueForGroup(ctx context.Context, groupKey string) (*Jo
 	defer tx.Rollback()
 
 	row := tx.QueryRowContext(ctx, `
-		SELECT id, input_path, target_type, is_modify, status, group_key, command, created_at
+		SELECT id, input_path, target_type, is_modify, status, group_key, stack_name, command, created_at
 		FROM jobs
 		WHERE status = ? AND group_key = ?
 		ORDER BY created_at ASC
@@ -262,7 +289,7 @@ func (s *SQLiteStore) Fail(ctx context.Context, jobID string, result *JobResult)
 // Get retrieves a job by ID
 func (s *SQLiteStore) Get(ctx context.Context, jobID string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, input_path, target_type, is_modify, status, group_key, command, created_at,
+		SELECT id, input_path, target_type, is_modify, status, group_key, stack_name, command, created_at,
 		       started_at, completed_at, exit_code, duration_ms, error, stdout, stderr
 		FROM jobs
 		WHERE id = ?
@@ -274,7 +301,7 @@ func (s *SQLiteStore) Get(ctx context.Context, jobID string) (*Job, error) {
 // GetByInputPath retrieves a pending or running job by input path
 func (s *SQLiteStore) GetByInputPath(ctx context.Context, inputPath string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, input_path, target_type, is_modify, status, group_key, command, created_at,
+		SELECT id, input_path, target_type, is_modify, status, group_key, stack_name, command, created_at,
 		       started_at, completed_at, exit_code, duration_ms, error, stdout, stderr
 		FROM jobs
 		WHERE input_path = ? AND status IN (?, ?)
@@ -305,7 +332,7 @@ func (s *SQLiteStore) ListRunning(ctx context.Context) ([]JobSummary, error) {
 
 func (s *SQLiteStore) listByStatus(ctx context.Context, status JobStatus, limit int) ([]JobSummary, error) {
 	query := `
-		SELECT id, input_path, status, group_key, created_at, error
+		SELECT id, input_path, status, group_key, stack_name, created_at, error
 		FROM jobs
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -324,15 +351,18 @@ func (s *SQLiteStore) listByStatus(ctx context.Context, status JobStatus, limit 
 	for rows.Next() {
 		var js JobSummary
 		var createdAt string
-		var groupKey, errStr sql.NullString
+		var groupKey, stackName, errStr sql.NullString
 
-		if err := rows.Scan(&js.ID, &js.InputPath, &js.Status, &groupKey, &createdAt, &errStr); err != nil {
+		if err := rows.Scan(&js.ID, &js.InputPath, &js.Status, &groupKey, &stackName, &createdAt, &errStr); err != nil {
 			return nil, err
 		}
 
 		js.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 		if groupKey.Valid {
 			js.GroupKey = groupKey.String
+		}
+		if stackName.Valid {
+			js.StackName = stackName.String
 		}
 		if errStr.Valid {
 			js.Error = errStr.String
@@ -472,9 +502,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var job Job
 	var createdAt string
 	var isModify int
-	var targetType, groupKey, commandJSON sql.NullString
+	var targetType, groupKey, stackName, commandJSON sql.NullString
 
-	err := row.Scan(&job.ID, &job.InputPath, &targetType, &isModify, &job.Status, &groupKey, &commandJSON, &createdAt)
+	err := row.Scan(&job.ID, &job.InputPath, &targetType, &isModify, &job.Status, &groupKey, &stackName, &commandJSON, &createdAt)
 	if err != nil {
 		return nil, err
 	}
@@ -486,6 +516,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 	}
 	if groupKey.Valid {
 		job.GroupKey = groupKey.String
+	}
+	if stackName.Valid {
+		job.StackName = stackName.String
 	}
 	if commandJSON.Valid {
 		if err := json.Unmarshal([]byte(commandJSON.String), &job.Command); err != nil {
@@ -501,11 +534,11 @@ func scanFullJob(row *sql.Row) (*Job, error) {
 	var job Job
 	var createdAt string
 	var isModify int
-	var targetType, groupKey, commandJSON, startedAt, completedAt, errStr, stdout, stderr sql.NullString
+	var targetType, groupKey, stackName, commandJSON, startedAt, completedAt, errStr, stdout, stderr sql.NullString
 	var exitCode, durationMs sql.NullInt64
 
 	err := row.Scan(
-		&job.ID, &job.InputPath, &targetType, &isModify, &job.Status, &groupKey, &commandJSON, &createdAt,
+		&job.ID, &job.InputPath, &targetType, &isModify, &job.Status, &groupKey, &stackName, &commandJSON, &createdAt,
 		&startedAt, &completedAt, &exitCode, &durationMs, &errStr, &stdout, &stderr,
 	)
 	if err != nil {
@@ -520,6 +553,9 @@ func scanFullJob(row *sql.Row) (*Job, error) {
 	}
 	if groupKey.Valid {
 		job.GroupKey = groupKey.String
+	}
+	if stackName.Valid {
+		job.StackName = stackName.String
 	}
 	if commandJSON.Valid {
 		if err := json.Unmarshal([]byte(commandJSON.String), &job.Command); err != nil {
@@ -552,4 +588,193 @@ func scanFullJob(row *sql.Row) (*Job, error) {
 	}
 
 	return &job, nil
+}
+
+// Stack mode methods
+
+// GetStackState returns the current stack state
+func (s *SQLiteStore) GetStackState(ctx context.Context) (*StackState, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT current_stack, last_switch_at, last_switch_duration_ms
+		FROM stack_state
+		WHERE id = 1
+	`)
+
+	var state StackState
+	var currentStack, lastSwitchAt sql.NullString
+	var lastSwitchDurationMs sql.NullInt64
+
+	err := row.Scan(&currentStack, &lastSwitchAt, &lastSwitchDurationMs)
+	if err == sql.ErrNoRows {
+		return &StackState{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if currentStack.Valid {
+		state.CurrentStack = currentStack.String
+	}
+	if lastSwitchAt.Valid {
+		t, _ := time.Parse(time.RFC3339Nano, lastSwitchAt.String)
+		state.LastSwitchAt = &t
+	}
+	if lastSwitchDurationMs.Valid {
+		state.LastSwitchDurationMs = lastSwitchDurationMs.Int64
+	}
+
+	return &state, nil
+}
+
+// SetCurrentStack updates the current stack and records switch duration
+func (s *SQLiteStore) SetCurrentStack(ctx context.Context, stackName string, switchDurationMs int64) error {
+	now := time.Now()
+
+	// Upsert the stack state
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO stack_state (id, current_stack, last_switch_at, last_switch_duration_ms)
+		VALUES (1, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			current_stack = excluded.current_stack,
+			last_switch_at = excluded.last_switch_at,
+			last_switch_duration_ms = excluded.last_switch_duration_ms
+	`, stackName, now.Format(time.RFC3339Nano), switchDurationMs)
+	if err != nil {
+		return err
+	}
+
+	// Update stack statistics
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO stack_stats (stack_name, switch_count, total_switch_duration_ms)
+		VALUES (?, 1, ?)
+		ON CONFLICT(stack_name) DO UPDATE SET
+			switch_count = stack_stats.switch_count + 1,
+			total_switch_duration_ms = stack_stats.total_switch_duration_ms + excluded.total_switch_duration_ms
+	`, stackName, switchDurationMs)
+
+	return err
+}
+
+// UpdateStackJobStats records a job completion for stack statistics
+func (s *SQLiteStore) UpdateStackJobStats(ctx context.Context, stackName string, jobDurationMs int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO stack_stats (stack_name, job_count, total_job_duration_ms)
+		VALUES (?, 1, ?)
+		ON CONFLICT(stack_name) DO UPDATE SET
+			job_count = stack_stats.job_count + 1,
+			total_job_duration_ms = stack_stats.total_job_duration_ms + excluded.total_job_duration_ms
+	`, stackName, jobDurationMs)
+	return err
+}
+
+// GetPendingCountByStack returns pending job counts grouped by stack
+func (s *SQLiteStore) GetPendingCountByStack(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT COALESCE(stack_name, '') as stack, COUNT(*) as count
+		FROM jobs
+		WHERE status = ?
+		GROUP BY stack_name
+	`, JobStatusPending)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]int)
+	for rows.Next() {
+		var stack string
+		var count int
+		if err := rows.Scan(&stack, &count); err != nil {
+			return nil, err
+		}
+		result[stack] = count
+	}
+
+	return result, rows.Err()
+}
+
+// DequeueForStack gets the next pending job for a specific stack
+func (s *SQLiteStore) DequeueForStack(ctx context.Context, stackName string) (*Job, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	// Handle empty stack name (NULL in DB)
+	var row *sql.Row
+	if stackName == "" {
+		row = tx.QueryRowContext(ctx, `
+			SELECT id, input_path, target_type, is_modify, status, group_key, stack_name, command, created_at
+			FROM jobs
+			WHERE status = ? AND (stack_name IS NULL OR stack_name = '')
+			ORDER BY created_at ASC
+			LIMIT 1
+		`, JobStatusPending)
+	} else {
+		row = tx.QueryRowContext(ctx, `
+			SELECT id, input_path, target_type, is_modify, status, group_key, stack_name, command, created_at
+			FROM jobs
+			WHERE status = ? AND stack_name = ?
+			ORDER BY created_at ASC
+			LIMIT 1
+		`, JobStatusPending, stackName)
+	}
+
+	job, err := scanJob(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	job.StartedAt = &now
+	job.Status = JobStatusRunning
+
+	_, err = tx.ExecContext(ctx, `
+		UPDATE jobs SET status = ?, started_at = ?
+		WHERE id = ?
+	`, job.Status, now.Format(time.RFC3339Nano), job.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return job, nil
+}
+
+// GetStackStats returns statistics for all stacks
+func (s *SQLiteStore) GetStackStats(ctx context.Context) ([]StackStats, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT stack_name, job_count, total_job_duration_ms, switch_count, total_switch_duration_ms
+		FROM stack_stats
+		ORDER BY stack_name
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var stats []StackStats
+	for rows.Next() {
+		var ss StackStats
+		if err := rows.Scan(&ss.StackName, &ss.JobCount, &ss.TotalJobDurationMs, &ss.SwitchCount, &ss.TotalSwitchDurationMs); err != nil {
+			return nil, err
+		}
+		// Compute averages
+		if ss.JobCount > 0 {
+			ss.AvgJobDurationMs = ss.TotalJobDurationMs / int64(ss.JobCount)
+		}
+		if ss.SwitchCount > 0 {
+			ss.AvgSwitchDurationMs = ss.TotalSwitchDurationMs / int64(ss.SwitchCount)
+		}
+		stats = append(stats, ss)
+	}
+
+	return stats, rows.Err()
 }

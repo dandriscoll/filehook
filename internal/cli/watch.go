@@ -132,14 +132,22 @@ func runWatch(cmd *cobra.Command, args []string) error {
 
 	// Start workers
 	var stopWorkers func()
-	if cfg.Concurrency.Mode == config.ConcurrencySequentialSwitch {
+	switch cfg.Concurrency.Mode {
+	case config.ConcurrencySequentialSwitch:
 		scheduler, err := worker.NewSequentialScheduler(cfg, store, namingPlugin, debugLogger, logger)
 		if err != nil {
 			return fmt.Errorf("failed to create scheduler: %w", err)
 		}
 		scheduler.Start(ctx)
 		stopWorkers = scheduler.Stop
-	} else {
+	case config.ConcurrencyStack:
+		scheduler, err := worker.NewStackScheduler(cfg, store, namingPlugin, debugLogger, logger)
+		if err != nil {
+			return fmt.Errorf("failed to create stack scheduler: %w", err)
+		}
+		scheduler.Start(ctx)
+		stopWorkers = scheduler.Stop
+	default:
 		pool, err := worker.NewPool(cfg, store, namingPlugin, debugLogger, logger)
 		if err != nil {
 			return fmt.Errorf("failed to create worker pool: %w", err)
@@ -149,7 +157,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 	defer stopWorkers()
 
-	logger.Printf("Started with %d workers in %s mode", cfg.Concurrency.MaxWorkers, cfg.Concurrency.Mode)
+	if cfg.Concurrency.Mode == config.ConcurrencyStack {
+		logger.Printf("Started in %s mode with %d stacks defined", cfg.Concurrency.Mode, len(cfg.Stacks.Definitions))
+	} else {
+		logger.Printf("Started with %d workers in %s mode", cfg.Concurrency.MaxWorkers, cfg.Concurrency.Mode)
+	}
 
 	// Initial scan of existing files (like run mode)
 	logger.Println("Scanning for existing files...")
@@ -311,12 +323,21 @@ func processEvent(
 		command = cfg.Command.AsSlice()
 	}
 
+	// Determine stack name from pattern (for stack mode)
+	var stackName string
+	if event.Pattern != nil && event.Pattern.Stack != "" {
+		stackName = event.Pattern.Stack
+	} else if cfg.Stacks.Default != "" {
+		stackName = cfg.Stacks.Default
+	}
+
 	// Enqueue job with target type - output paths will be calculated at execution time
 	job := &queue.Job{
 		InputPath:  event.Path,
 		TargetType: targetType,
 		IsModify:   event.IsModify,
 		GroupKey:   groupKey,
+		StackName:  stackName,
 		Command:    command,
 	}
 
@@ -324,8 +345,12 @@ func processEvent(
 		return fmt.Errorf("failed to enqueue: %w", err)
 	}
 
-	debugLogger.Decision(event.Path, "QUEUED", fmt.Sprintf("targetType=%s, groupKey=%s, reason=%s", targetType, groupKey, reason))
-	logger.Printf("Queued: %s (target_type=%s, reason: %s)", event.Path, targetType, reason)
+	debugLogger.Decision(event.Path, "QUEUED", fmt.Sprintf("targetType=%s, groupKey=%s, stackName=%s, reason=%s", targetType, groupKey, stackName, reason))
+	if stackName != "" {
+		logger.Printf("Queued: %s (target_type=%s, stack=%s, reason: %s)", event.Path, targetType, stackName, reason)
+	} else {
+		logger.Printf("Queued: %s (target_type=%s, reason: %s)", event.Path, targetType, reason)
+	}
 	return nil
 }
 

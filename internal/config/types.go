@@ -14,6 +14,7 @@ type Config struct {
 	Command     CommandConfig     `yaml:"command"`
 	Plugins     PluginsConfig     `yaml:"plugins"`
 	Concurrency ConcurrencyConfig `yaml:"concurrency"`
+	Stacks      StacksConfig      `yaml:"stacks"`
 	OnModified  ModifiedPolicy    `yaml:"on_modified"`
 	StateDir    string            `yaml:"state_dir"`
 	Debug       bool              `yaml:"debug"` // Enable verbose debug logging to .filehook/debug.log
@@ -22,6 +23,18 @@ type Config struct {
 	ConfigPath string `yaml:"-"`
 	// ConfigDir is the directory containing the config file
 	ConfigDir string `yaml:"-"`
+}
+
+// StacksConfig defines stack definitions for stack concurrency mode
+type StacksConfig struct {
+	Definitions []StackDefinition `yaml:"definitions"`
+	Default     string            `yaml:"default"` // Default stack when pattern has none
+}
+
+// StackDefinition defines a single stack with its switch script
+type StackDefinition struct {
+	Name         string `yaml:"name"`
+	SwitchScript string `yaml:"switch_script"`
 }
 
 // WatchConfig defines what paths to watch
@@ -51,6 +64,7 @@ type PatternConfig struct {
 	Exclude    []string       `yaml:"exclude"`
 	Command    *CommandConfig `yaml:"command,omitempty"`
 	TargetType string         `yaml:"target_type"` // target type for naming plugin (e.g., "png", "sdxl")
+	Stack      string         `yaml:"stack"`       // which stack this pattern requires (for stack mode)
 }
 
 // HasCommand returns true if this pattern has its own command
@@ -68,6 +82,7 @@ func (p *PatternConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		p.Exclude = nil
 		p.Command = nil
 		p.TargetType = ""
+		p.Stack = ""
 		return nil
 	}
 	// Try object format
@@ -77,6 +92,7 @@ func (p *PatternConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		Exclude    []string       `yaml:"exclude"`
 		Command    *CommandConfig `yaml:"command"`
 		TargetType string         `yaml:"target_type"`
+		Stack      string         `yaml:"stack"`
 	}
 	var raw patternConfigRaw
 	if err := unmarshal(&raw); err != nil {
@@ -87,6 +103,7 @@ func (p *PatternConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	p.Exclude = raw.Exclude
 	p.Command = raw.Command
 	p.TargetType = raw.TargetType
+	p.Stack = raw.Stack
 	return nil
 }
 
@@ -183,6 +200,7 @@ type ConcurrencyMode string
 const (
 	ConcurrencyParallel         ConcurrencyMode = "parallel"
 	ConcurrencySequentialSwitch ConcurrencyMode = "sequential_switch"
+	ConcurrencyStack            ConcurrencyMode = "stack"
 )
 
 // ModifiedPolicy defines behavior when input files are modified
@@ -229,4 +247,19 @@ func (c *Config) WatchPaths() []string {
 		paths[i] = c.ResolvePath(p)
 	}
 	return paths
+}
+
+// GetStackDefinition returns the stack definition for the given name, or nil if not found
+func (c *Config) GetStackDefinition(name string) *StackDefinition {
+	for i := range c.Stacks.Definitions {
+		if c.Stacks.Definitions[i].Name == name {
+			return &c.Stacks.Definitions[i]
+		}
+	}
+	return nil
+}
+
+// HasStack returns true if the stack is defined
+func (c *Config) HasStack(name string) bool {
+	return c.GetStackDefinition(name) != nil
 }

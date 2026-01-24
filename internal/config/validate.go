@@ -77,13 +77,18 @@ func Validate(cfg *Config) []error {
 
 	// Concurrency mode validation
 	switch cfg.Concurrency.Mode {
-	case ConcurrencyParallel, ConcurrencySequentialSwitch:
+	case ConcurrencyParallel, ConcurrencySequentialSwitch, ConcurrencyStack:
 		// Valid
 	default:
 		errs = append(errs, ValidationError{
 			Field:   "concurrency.mode",
-			Message: fmt.Sprintf("invalid mode %q (must be 'parallel' or 'sequential_switch')", cfg.Concurrency.Mode),
+			Message: fmt.Sprintf("invalid mode %q (must be 'parallel', 'sequential_switch', or 'stack')", cfg.Concurrency.Mode),
 		})
+	}
+
+	// Stack mode validation
+	if cfg.Concurrency.Mode == ConcurrencyStack {
+		errs = append(errs, validateStackMode(cfg)...)
 	}
 
 	// On modified policy validation
@@ -116,6 +121,85 @@ func Validate(cfg *Config) []error {
 				})
 			}
 			seenNames[p.Name] = i
+		}
+	}
+
+	return errs
+}
+
+// validateStackMode validates stack mode specific configuration
+func validateStackMode(cfg *Config) []error {
+	var errs []error
+
+	// Require stack definitions
+	if len(cfg.Stacks.Definitions) == 0 {
+		errs = append(errs, ValidationError{
+			Field:   "stacks.definitions",
+			Message: "at least one stack definition is required when using stack mode",
+		})
+		return errs // Can't validate further without definitions
+	}
+
+	// Build set of defined stack names
+	stackNames := make(map[string]bool)
+	for i, def := range cfg.Stacks.Definitions {
+		if def.Name == "" {
+			errs = append(errs, ValidationError{
+				Field:   fmt.Sprintf("stacks.definitions[%d].name", i),
+				Message: "stack name is required",
+			})
+			continue
+		}
+
+		if stackNames[def.Name] {
+			errs = append(errs, ValidationError{
+				Field:   fmt.Sprintf("stacks.definitions[%d].name", i),
+				Message: fmt.Sprintf("duplicate stack name %q", def.Name),
+			})
+		}
+		stackNames[def.Name] = true
+
+		if def.SwitchScript == "" {
+			errs = append(errs, ValidationError{
+				Field:   fmt.Sprintf("stacks.definitions[%d].switch_script", i),
+				Message: "switch_script is required",
+			})
+		} else {
+			// Validate switch script exists and is executable
+			scriptPath := cfg.ResolvePath(def.SwitchScript)
+			info, err := os.Stat(scriptPath)
+			if os.IsNotExist(err) {
+				errs = append(errs, ValidationError{
+					Field:   fmt.Sprintf("stacks.definitions[%d].switch_script", i),
+					Message: fmt.Sprintf("script not found: %s", scriptPath),
+				})
+			} else if err == nil {
+				// Check if executable (Unix permissions)
+				if info.Mode()&0111 == 0 {
+					errs = append(errs, ValidationError{
+						Field:   fmt.Sprintf("stacks.definitions[%d].switch_script", i),
+						Message: fmt.Sprintf("script is not executable: %s", scriptPath),
+					})
+				}
+			}
+		}
+	}
+
+	// Validate default stack if set
+	if cfg.Stacks.Default != "" && !stackNames[cfg.Stacks.Default] {
+		errs = append(errs, ValidationError{
+			Field:   "stacks.default",
+			Message: fmt.Sprintf("default stack %q is not defined in stacks.definitions", cfg.Stacks.Default),
+		})
+	}
+
+	// Validate pattern stack references
+	for i, pattern := range cfg.Inputs.Patterns {
+		if pattern.Stack != "" && !stackNames[pattern.Stack] {
+			errs = append(errs, ValidationError{
+				Field:   fmt.Sprintf("inputs.patterns[%d].stack", i),
+				Message: fmt.Sprintf("stack %q is not defined in stacks.definitions", pattern.Stack),
+			})
 		}
 	}
 

@@ -61,4 +61,24 @@ type Store interface {
 	// CleanupStaleRunning resets jobs that were running but never completed
 	// (e.g., after a crash)
 	CleanupStaleRunning(ctx context.Context) (int, error)
+
+	// Stack mode methods
+
+	// GetStackState returns the current stack state
+	GetStackState(ctx context.Context) (*StackState, error)
+
+	// SetCurrentStack updates the current stack and records switch duration
+	SetCurrentStack(ctx context.Context, stackName string, switchDurationMs int64) error
+
+	// UpdateStackJobStats records a job completion for stack statistics
+	UpdateStackJobStats(ctx context.Context, stackName string, jobDurationMs int64) error
+
+	// GetPendingCountByStack returns pending job counts grouped by stack
+	GetPendingCountByStack(ctx context.Context) (map[string]int, error)
+
+	// DequeueForStack gets the next pending job for a specific stack
+	DequeueForStack(ctx context.Context, stackName string) (*Job, error)
+
+	// GetStackStats returns statistics for all stacks
+	GetStackStats(ctx context.Context) ([]StackStats, error)
 }

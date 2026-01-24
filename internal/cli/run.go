@@ -169,7 +169,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Process all jobs
 	logger.Println("Processing jobs...")
 
-	if cfg.Concurrency.Mode == config.ConcurrencySequentialSwitch {
+	switch cfg.Concurrency.Mode {
+	case config.ConcurrencySequentialSwitch:
 		scheduler, err := worker.NewSequentialScheduler(cfg, store, namingPlugin, debugLogger, logger)
 		if err != nil {
 			return fmt.Errorf("failed to create scheduler: %w", err)
@@ -177,7 +178,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if err := scheduler.RunOnce(ctx); err != nil {
 			return err
 		}
-	} else {
+	case config.ConcurrencyStack:
+		scheduler, err := worker.NewStackScheduler(cfg, store, namingPlugin, debugLogger, logger)
+		if err != nil {
+			return fmt.Errorf("failed to create stack scheduler: %w", err)
+		}
+		if err := scheduler.RunOnce(ctx); err != nil {
+			return err
+		}
+	default:
 		pool, err := worker.NewPool(cfg, store, namingPlugin, debugLogger, logger)
 		if err != nil {
 			return fmt.Errorf("failed to create worker pool: %w", err)

@@ -23,6 +23,7 @@ type Job struct {
 	IsModify    bool       `json:"is_modify,omitempty"` // True if this was a file modification event
 	Status      JobStatus  `json:"status"`
 	GroupKey    string     `json:"group_key,omitempty"`
+	StackName   string     `json:"stack_name,omitempty"` // Which stack this job requires (for stack mode)
 	Command     []string   `json:"command,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	StartedAt   *time.Time `json:"started_at,omitempty"`
@@ -40,6 +41,7 @@ type JobSummary struct {
 	InputPath string    `json:"input_path"`
 	Status    JobStatus `json:"status"`
 	GroupKey  string    `json:"group_key,omitempty"`
+	StackName string    `json:"stack_name,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	Error     string    `json:"error,omitempty"`
 }
@@ -51,6 +53,7 @@ func (j *Job) ToSummary() JobSummary {
 		InputPath: j.InputPath,
 		Status:    j.Status,
 		GroupKey:  j.GroupKey,
+		StackName: j.StackName,
 		CreatedAt: j.CreatedAt,
 		Error:     j.Error,
 	}
@@ -72,4 +75,22 @@ type JobResult struct {
 	Stderr     string
 	DurationMs int64
 	Error      error
+}
+
+// StackState represents the current stack state (for stack mode)
+type StackState struct {
+	CurrentStack         string
+	LastSwitchAt         *time.Time
+	LastSwitchDurationMs int64
+}
+
+// StackStats holds statistics for a single stack
+type StackStats struct {
+	StackName             string
+	JobCount              int
+	TotalJobDurationMs    int64
+	AvgJobDurationMs      int64 // computed
+	SwitchCount           int
+	TotalSwitchDurationMs int64
+	AvgSwitchDurationMs   int64 // computed
 }
