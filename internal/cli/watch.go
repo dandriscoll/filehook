@@ -6,7 +6,9 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/dandriscoll/filehook/internal/config"
 	"github.com/dandriscoll/filehook/internal/debug"
@@ -17,7 +19,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var watchPattern string
+var (
+	watchPattern       string
+	watchInstanceID    string
+	watchDefaultPriority int
+)
 
 var watchCmd = &cobra.Command{
 	Use:   "watch",
@@ -28,6 +34,8 @@ var watchCmd = &cobra.Command{
 
 func init() {
 	watchCmd.Flags().StringVarP(&watchPattern, "pattern", "p", "", "only process files matching the named pattern")
+	watchCmd.Flags().StringVar(&watchInstanceID, "instance", "", "instance name for job tagging (default: config file basename)")
+	watchCmd.Flags().IntVar(&watchDefaultPriority, "priority", 0, "default priority for all jobs from this instance")
 	rootCmd.AddCommand(watchCmd)
 }
 
@@ -89,14 +97,49 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to initialize queue: %w", err)
 	}
 
-	// Cleanup stale running jobs from previous run
-	cleaned, err := store.CleanupStaleRunning(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to cleanup stale jobs: %w", err)
+	// Resolve instance ID
+	instanceID := resolveInstanceID(watchInstanceID, cfgFile)
+
+	// Check for a live scheduler to determine mode
+	schedulerProc, _ := store.GetSchedulerProcess(ctx)
+	producerMode := schedulerProc != nil
+
+	if producerMode {
+		logger.Printf("Scheduler detected (PID %d), running in producer mode", schedulerProc.PID)
+	} else {
+		logger.Println("No scheduler detected, running in legacy mode")
+		// Cleanup stale running jobs from previous run (only in legacy mode)
+		cleaned, err := store.CleanupStaleRunning(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to cleanup stale jobs: %w", err)
+		}
+		if cleaned > 0 {
+			logger.Printf("Reset %d stale running jobs to pending", cleaned)
+		}
 	}
-	if cleaned > 0 {
-		logger.Printf("Reset %d stale running jobs to pending", cleaned)
+
+	// Register this process
+	pid := os.Getpid()
+	role := queue.ProcessRoleLegacy
+	if producerMode {
+		role = queue.ProcessRoleProducer
 	}
+	processInfo := &queue.ProcessInfo{
+		PID:        pid,
+		Command:    "watch",
+		Role:       role,
+		InstanceID: instanceID,
+		StartedAt:  time.Now(),
+	}
+	if err := store.RegisterProcess(ctx, processInfo); err != nil {
+		logger.Printf("Warning: failed to register process: %v", err)
+	}
+	defer func() {
+		// Unregister on shutdown
+		if err := store.UnregisterProcess(context.Background(), pid); err != nil {
+			logger.Printf("Warning: failed to unregister process: %v", err)
+		}
+	}()
 
 	// Initialize plugins
 	namingPlugin, err := plugin.NewNamingPlugin(cfg, debugLogger)
@@ -130,38 +173,46 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// Start watcher
 	w.Start(ctx)
 
-	// Start workers
+	// Start workers only in legacy mode (no scheduler present)
 	var stopWorkers func()
-	switch cfg.Concurrency.Mode {
-	case config.ConcurrencySequentialSwitch:
-		scheduler, err := worker.NewSequentialScheduler(cfg, store, namingPlugin, debugLogger, logger)
-		if err != nil {
-			return fmt.Errorf("failed to create scheduler: %w", err)
+	if !producerMode {
+		switch cfg.Concurrency.Mode {
+		case config.ConcurrencySequentialSwitch:
+			scheduler, err := worker.NewSequentialScheduler(cfg, store, namingPlugin, debugLogger, logger)
+			if err != nil {
+				return fmt.Errorf("failed to create scheduler: %w", err)
+			}
+			scheduler.Start(ctx)
+			stopWorkers = scheduler.Stop
+		case config.ConcurrencyStack:
+			scheduler, err := worker.NewStackScheduler(cfg, store, namingPlugin, debugLogger, logger)
+			if err != nil {
+				return fmt.Errorf("failed to create stack scheduler: %w", err)
+			}
+			scheduler.Start(ctx)
+			stopWorkers = scheduler.Stop
+		default:
+			pool, err := worker.NewPool(cfg, store, namingPlugin, debugLogger, logger)
+			if err != nil {
+				return fmt.Errorf("failed to create worker pool: %w", err)
+			}
+			pool.Start(ctx)
+			stopWorkers = pool.Stop
 		}
-		scheduler.Start(ctx)
-		stopWorkers = scheduler.Stop
-	case config.ConcurrencyStack:
-		scheduler, err := worker.NewStackScheduler(cfg, store, namingPlugin, debugLogger, logger)
-		if err != nil {
-			return fmt.Errorf("failed to create stack scheduler: %w", err)
-		}
-		scheduler.Start(ctx)
-		stopWorkers = scheduler.Stop
-	default:
-		pool, err := worker.NewPool(cfg, store, namingPlugin, debugLogger, logger)
-		if err != nil {
-			return fmt.Errorf("failed to create worker pool: %w", err)
-		}
-		pool.Start(ctx)
-		stopWorkers = pool.Stop
-	}
-	defer stopWorkers()
 
-	if cfg.Concurrency.Mode == config.ConcurrencyStack {
-		logger.Printf("Started in %s mode with %d stacks defined", cfg.Concurrency.Mode, len(cfg.Stacks.Definitions))
-	} else {
-		logger.Printf("Started with %d workers in %s mode", cfg.Concurrency.MaxWorkers, cfg.Concurrency.Mode)
+		if cfg.Concurrency.Mode == config.ConcurrencyStack {
+			logger.Printf("Started in %s mode with %d stacks defined", cfg.Concurrency.Mode, len(cfg.Stacks.Definitions))
+		} else {
+			logger.Printf("Started with %d workers in %s mode", cfg.Concurrency.MaxWorkers, cfg.Concurrency.Mode)
+		}
 	}
+	defer func() {
+		if stopWorkers != nil {
+			stopWorkers()
+		}
+	}()
+
+	evtOpts := eventOptions{instanceID: instanceID, defaultPriority: watchDefaultPriority}
 
 	// Initial scan of existing files (like run mode)
 	logger.Println("Scanning for existing files...")
@@ -177,7 +228,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 				if !ok {
 					return
 				}
-				if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger); err != nil {
+				if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger, evtOpts); err != nil {
 					logger.Printf("Error processing %s: %v", event.Path, err)
 				}
 			case <-scanDone:
@@ -188,7 +239,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 						if !ok {
 							return
 						}
-						if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger); err != nil {
+						if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger, evtOpts); err != nil {
 							logger.Printf("Error processing %s: %v", event.Path, err)
 						}
 					default:
@@ -222,7 +273,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 			return nil
 
 		case event := <-w.Events():
-			if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger); err != nil {
+			if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger, evtOpts); err != nil {
 				logger.Printf("Error processing %s: %v", event.Path, err)
 			}
 
@@ -230,6 +281,12 @@ func runWatch(cmd *cobra.Command, args []string) error {
 			logger.Printf("Watcher error: %v", err)
 		}
 	}
+}
+
+// eventOptions holds optional parameters for processEvent
+type eventOptions struct {
+	instanceID      string
+	defaultPriority int
 }
 
 func processEvent(
@@ -242,6 +299,7 @@ func processEvent(
 	event watcher.Event,
 	logger *log.Logger,
 	debugLogger *debug.Logger,
+	opts ...eventOptions,
 ) error {
 	eventType := "CREATE"
 	if event.IsModify {
@@ -341,6 +399,16 @@ func processEvent(
 		Command:    command,
 	}
 
+	// Apply instance tagging and default priority from options
+	if len(opts) > 0 {
+		if opts[0].instanceID != "" {
+			job.InstanceID = opts[0].instanceID
+		}
+		if opts[0].defaultPriority != 0 {
+			job.Priority = opts[0].defaultPriority
+		}
+	}
+
 	if err := store.Enqueue(ctx, job); err != nil {
 		return fmt.Errorf("failed to enqueue: %w", err)
 	}
@@ -352,6 +420,22 @@ func processEvent(
 		logger.Printf("Queued: %s (target_type=%s, reason: %s)", event.Path, targetType, reason)
 	}
 	return nil
+}
+
+// resolveInstanceID returns the instance ID to use, deriving from config file basename if not specified
+func resolveInstanceID(explicit string, configFile string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if configFile != "" {
+		base := filepath.Base(configFile)
+		ext := filepath.Ext(base)
+		if ext != "" {
+			return base[:len(base)-len(ext)]
+		}
+		return base
+	}
+	return "filehook"
 }
 
 // watchDryRun prints what the watch command would do

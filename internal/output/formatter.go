@@ -57,6 +57,9 @@ func (f *Formatter) PrintJobSummaries(jobs []queue.JobSummary, title string) err
 		age := formatDuration(time.Since(job.CreatedAt))
 		shortPath := shortenPath(job.InputPath, 50)
 		line := fmt.Sprintf("  %s  %s  (%s ago)", job.ID[:8], shortPath, age)
+		if job.Priority != 0 {
+			line += fmt.Sprintf(" [priority %d]", job.Priority)
+		}
 		if job.Error != "" {
 			errSummary := job.Error
 			if len(errSummary) > 40 {
@@ -191,5 +194,56 @@ func (f *Formatter) PrintStackStatus(data *StackStatusData) error {
 		return f.printJSON(data)
 	}
 	// Non-JSON output is handled directly in the status command
+	return nil
+}
+
+// PrintFullStatus prints the full process status (for the state command)
+func (f *Formatter) PrintFullStatus(status *queue.FullStatus) error {
+	if f.json {
+		return f.printJSON(status)
+	}
+
+	// Simple human-readable output
+	fmt.Fprintf(f.writer, "State: %s\n", status.State)
+
+	if status.Scheduler != nil {
+		fmt.Fprintf(f.writer, "Scheduler: PID %d (running since %s)\n",
+			status.Scheduler.PID,
+			status.Scheduler.StartedAt.Format(time.RFC3339))
+	}
+
+	if len(status.Producers) > 0 {
+		fmt.Fprintf(f.writer, "Producers:\n")
+		for _, p := range status.Producers {
+			instance := p.InstanceID
+			if instance == "" {
+				instance = "(none)"
+			}
+			fmt.Fprintf(f.writer, "  PID %d: %s instance=%s (since %s)\n",
+				p.PID, p.Command, instance, p.StartedAt.Format(time.RFC3339))
+		}
+	}
+
+	if status.Process != nil && status.Scheduler == nil && len(status.Producers) == 0 {
+		fmt.Fprintf(f.writer, "Process: %s (PID %d, running since %s)\n",
+			status.Process.Command, status.Process.PID,
+			status.Process.StartedAt.Format(time.RFC3339))
+	}
+
+	fmt.Fprintf(f.writer, "Queue: %d pending, %d running, %d completed, %d failed\n",
+		status.Stats.Pending, status.Stats.Running, status.Stats.Completed, status.Stats.Failed)
+
+	if status.CurrentJob != nil {
+		fmt.Fprintf(f.writer, "Current: %s %s\n", status.CurrentJob.ID[:8], shortenPath(status.CurrentJob.InputPath, 50))
+	}
+
+	if status.NextJob != nil {
+		priority := ""
+		if status.NextJob.Priority != 0 {
+			priority = fmt.Sprintf(" (priority %d)", status.NextJob.Priority)
+		}
+		fmt.Fprintf(f.writer, "Next: %s %s%s\n", status.NextJob.ID[:8], shortenPath(status.NextJob.InputPath, 50), priority)
+	}
+
 	return nil
 }

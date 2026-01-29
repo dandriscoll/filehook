@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/dandriscoll/filehook/internal/config"
 	"github.com/spf13/cobra"
@@ -35,6 +36,10 @@ parallel or sequential job execution, and durable on-disk queuing.`,
 
 // Execute runs the root command
 func Execute() {
+	// Parse flags early to check for --descriptor before running any command
+	rootCmd.ParseFlags(os.Args[1:])
+	checkDescriptorFlag()
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -124,7 +129,14 @@ func getTargetDirectory() string {
 // If -d is specified, returns just that directory; otherwise uses config's watch paths.
 func getEffectiveWatchPaths(cfg *config.Config) []string {
 	if directory != "" {
-		return []string{cfg.ResolvePath(directory)}
+		if filepath.IsAbs(directory) {
+			return []string{directory}
+		}
+		// Resolve -d relative to current working directory, not config dir
+		if wd, err := os.Getwd(); err == nil {
+			return []string{filepath.Join(wd, directory)}
+		}
+		return []string{directory}
 	}
 	return cfg.WatchPaths()
 }

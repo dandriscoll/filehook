@@ -18,9 +18,30 @@ var statusCmd = &cobra.Command{
 	RunE:  runStatus,
 }
 
+var stateCmd = &cobra.Command{
+	Use:   "state",
+	Short: "Show process state (for programmatic use)",
+	Long: `Show the current state of filehook processing.
+
+Returns a simple state indicator:
+  not_running  - No filehook process is actively processing
+  idle         - A filehook process is running but no work to do
+  processing   - A filehook process is running and has work
+
+Use --json for machine-readable output that includes:
+  - state: The process state
+  - process: Info about the running process (if any)
+  - stats: Queue statistics
+  - current_job: Currently running job (if any)
+  - next_job: Next job to be processed (if any)
+  - queue_length: Number of pending jobs`,
+	RunE: runState,
+}
+
 func init() {
 	statusCmd.Flags().BoolVar(&showStacks, "stacks", false, "show detailed stack information (for stack mode)")
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(stateCmd)
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
@@ -137,4 +158,91 @@ func printStackStatus(ctx context.Context, cfg *config.Config, store queue.Store
 	}
 
 	return nil
+}
+
+func runState(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	store, err := queue.NewSQLiteStore(cfg.StateDirectory())
+	if err != nil {
+		return fmt.Errorf("failed to open queue: %w", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.Initialize(ctx); err != nil {
+		return fmt.Errorf("failed to initialize queue: %w", err)
+	}
+
+	// Build the full status
+	fullStatus := &queue.FullStatus{}
+
+	// Get queue stats
+	stats, err := store.GetStats(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get stats: %w", err)
+	}
+	fullStatus.Stats = stats
+	fullStatus.QueueLength = stats.Pending
+
+	// Get process info (multi-process aware)
+	allProcesses, err := store.GetActiveProcesses(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get process info: %w", err)
+	}
+
+	// Populate scheduler and producers
+	for _, p := range allProcesses {
+		p := p
+		if p.Role == queue.ProcessRoleScheduler {
+			fullStatus.Scheduler = &p
+		} else {
+			fullStatus.Producers = append(fullStatus.Producers, p)
+		}
+	}
+
+	// Backward compat: set Process to first active process
+	var processInfo *queue.ProcessInfo
+	if fullStatus.Scheduler != nil {
+		processInfo = fullStatus.Scheduler
+	} else if len(fullStatus.Producers) > 0 {
+		processInfo = &fullStatus.Producers[0]
+	} else if len(allProcesses) > 0 {
+		processInfo = &allProcesses[0]
+	}
+	fullStatus.Process = processInfo
+
+	// Get current running job (if any)
+	running, err := store.ListRunning(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list running jobs: %w", err)
+	}
+	if len(running) > 0 {
+		fullStatus.CurrentJob = &running[0]
+	}
+
+	// Get next pending job (if any)
+	nextJob, err := store.GetNextPendingJob(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get next pending job: %w", err)
+	}
+	if nextJob != nil {
+		summary := nextJob.ToSummary()
+		fullStatus.NextJob = &summary
+	}
+
+	// Determine the state
+	if processInfo == nil {
+		fullStatus.State = queue.ProcessStateNotRunning
+	} else if stats.Running > 0 || stats.Pending > 0 {
+		fullStatus.State = queue.ProcessStateProcessing
+	} else {
+		fullStatus.State = queue.ProcessStateIdle
+	}
+
+	formatter := output.New(isJSONOutput())
+	return formatter.PrintFullStatus(fullStatus)
 }

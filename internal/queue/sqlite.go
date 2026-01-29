@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,7 +28,7 @@ func NewSQLiteStore(stateDir string) (*SQLiteStore, error) {
 	}
 
 	dbPath := filepath.Join(stateDir, "queue.db")
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=30000")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -86,6 +87,13 @@ func (s *SQLiteStore) Initialize(ctx context.Context) error {
 			switch_count INTEGER DEFAULT 0,
 			total_switch_duration_ms INTEGER DEFAULT 0
 		);
+
+		-- Process registration (for detecting running instances)
+		CREATE TABLE IF NOT EXISTS process_info (
+			pid INTEGER PRIMARY KEY,
+			command TEXT NOT NULL,
+			started_at TEXT NOT NULL
+		);
 	`
 
 	_, err := s.db.ExecContext(ctx, schema)
@@ -98,6 +106,12 @@ func (s *SQLiteStore) Initialize(ctx context.Context) error {
 		"ALTER TABLE jobs ADD COLUMN target_type TEXT",
 		"ALTER TABLE jobs ADD COLUMN is_modify INTEGER DEFAULT 0",
 		"ALTER TABLE jobs ADD COLUMN stack_name TEXT",
+		"ALTER TABLE jobs ADD COLUMN priority INTEGER DEFAULT 0",
+		"ALTER TABLE jobs ADD COLUMN instance_id TEXT",
+		"ALTER TABLE jobs ADD COLUMN claimed_by INTEGER",
+		"ALTER TABLE process_info ADD COLUMN role TEXT DEFAULT 'legacy'",
+		"ALTER TABLE process_info ADD COLUMN instance_id TEXT",
+		"ALTER TABLE process_info ADD COLUMN heartbeat_at TEXT",
 	}
 
 	for _, migration := range migrations {
@@ -107,6 +121,12 @@ func (s *SQLiteStore) Initialize(ctx context.Context) error {
 
 	// Create index for stack_name if it doesn't exist
 	s.db.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS idx_jobs_stack_status ON jobs(stack_name, status)")
+
+	// Create index for priority ordering
+	s.db.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS idx_jobs_priority ON jobs(status, priority DESC, created_at ASC)")
+
+	// Create index for instance filtering
+	s.db.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS idx_jobs_instance ON jobs(instance_id, status)")
 
 	return nil
 }
@@ -157,15 +177,20 @@ func (s *SQLiteStore) Enqueue(ctx context.Context, job *Job) error {
 		stackName = &job.StackName
 	}
 
+	var instanceID *string
+	if job.InstanceID != "" {
+		instanceID = &job.InstanceID
+	}
+
 	isModify := 0
 	if job.IsModify {
 		isModify = 1
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO jobs (id, input_path, target_type, is_modify, status, group_key, stack_name, command, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, job.ID, job.InputPath, targetType, isModify, job.Status, job.GroupKey, stackName, commandJSON, job.CreatedAt.Format(time.RFC3339Nano))
+		INSERT INTO jobs (id, input_path, target_type, is_modify, status, priority, group_key, stack_name, instance_id, command, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, job.ID, job.InputPath, targetType, isModify, job.Status, job.Priority, job.GroupKey, stackName, instanceID, commandJSON, job.CreatedAt.Format(time.RFC3339Nano))
 
 	return err
 }
@@ -178,12 +203,12 @@ func (s *SQLiteStore) Dequeue(ctx context.Context) (*Job, error) {
 	}
 	defer tx.Rollback()
 
-	// Get oldest pending job
+	// Get highest priority pending job (priority DESC, then oldest first)
 	row := tx.QueryRowContext(ctx, `
-		SELECT id, input_path, target_type, is_modify, status, group_key, stack_name, command, created_at
+		SELECT id, input_path, target_type, is_modify, status, priority, group_key, stack_name, command, created_at
 		FROM jobs
 		WHERE status = ?
-		ORDER BY created_at ASC
+		ORDER BY priority DESC, created_at ASC
 		LIMIT 1
 	`, JobStatusPending)
 
@@ -224,10 +249,10 @@ func (s *SQLiteStore) DequeueForGroup(ctx context.Context, groupKey string) (*Jo
 	defer tx.Rollback()
 
 	row := tx.QueryRowContext(ctx, `
-		SELECT id, input_path, target_type, is_modify, status, group_key, stack_name, command, created_at
+		SELECT id, input_path, target_type, is_modify, status, priority, group_key, stack_name, command, created_at
 		FROM jobs
 		WHERE status = ? AND group_key = ?
-		ORDER BY created_at ASC
+		ORDER BY priority DESC, created_at ASC
 		LIMIT 1
 	`, JobStatusPending, groupKey)
 
@@ -289,7 +314,7 @@ func (s *SQLiteStore) Fail(ctx context.Context, jobID string, result *JobResult)
 // Get retrieves a job by ID
 func (s *SQLiteStore) Get(ctx context.Context, jobID string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, input_path, target_type, is_modify, status, group_key, stack_name, command, created_at,
+		SELECT id, input_path, target_type, is_modify, status, priority, group_key, stack_name, instance_id, claimed_by, command, created_at,
 		       started_at, completed_at, exit_code, duration_ms, error, stdout, stderr
 		FROM jobs
 		WHERE id = ?
@@ -301,7 +326,7 @@ func (s *SQLiteStore) Get(ctx context.Context, jobID string) (*Job, error) {
 // GetByInputPath retrieves a pending or running job by input path
 func (s *SQLiteStore) GetByInputPath(ctx context.Context, inputPath string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, input_path, target_type, is_modify, status, group_key, stack_name, command, created_at,
+		SELECT id, input_path, target_type, is_modify, status, priority, group_key, stack_name, instance_id, claimed_by, command, created_at,
 		       started_at, completed_at, exit_code, duration_ms, error, stdout, stderr
 		FROM jobs
 		WHERE input_path = ? AND status IN (?, ?)
@@ -332,10 +357,10 @@ func (s *SQLiteStore) ListRunning(ctx context.Context) ([]JobSummary, error) {
 
 func (s *SQLiteStore) listByStatus(ctx context.Context, status JobStatus, limit int) ([]JobSummary, error) {
 	query := `
-		SELECT id, input_path, status, group_key, stack_name, created_at, error
+		SELECT id, input_path, status, priority, group_key, stack_name, instance_id, created_at, error
 		FROM jobs
 		WHERE status = ?
-		ORDER BY created_at ASC
+		ORDER BY priority DESC, created_at ASC
 	`
 	if limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", limit)
@@ -347,22 +372,33 @@ func (s *SQLiteStore) listByStatus(ctx context.Context, status JobStatus, limit 
 	}
 	defer rows.Close()
 
+	return scanJobSummaries(rows)
+}
+
+func scanJobSummaries(rows *sql.Rows) ([]JobSummary, error) {
 	var summaries []JobSummary
 	for rows.Next() {
 		var js JobSummary
 		var createdAt string
-		var groupKey, stackName, errStr sql.NullString
+		var priority sql.NullInt64
+		var groupKey, stackName, instanceID, errStr sql.NullString
 
-		if err := rows.Scan(&js.ID, &js.InputPath, &js.Status, &groupKey, &stackName, &createdAt, &errStr); err != nil {
+		if err := rows.Scan(&js.ID, &js.InputPath, &js.Status, &priority, &groupKey, &stackName, &instanceID, &createdAt, &errStr); err != nil {
 			return nil, err
 		}
 
 		js.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		if priority.Valid {
+			js.Priority = int(priority.Int64)
+		}
 		if groupKey.Valid {
 			js.GroupKey = groupKey.String
 		}
 		if stackName.Valid {
 			js.StackName = stackName.String
+		}
+		if instanceID.Valid {
+			js.InstanceID = instanceID.String
 		}
 		if errStr.Valid {
 			js.Error = errStr.String
@@ -502,15 +538,19 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var job Job
 	var createdAt string
 	var isModify int
+	var priority sql.NullInt64
 	var targetType, groupKey, stackName, commandJSON sql.NullString
 
-	err := row.Scan(&job.ID, &job.InputPath, &targetType, &isModify, &job.Status, &groupKey, &stackName, &commandJSON, &createdAt)
+	err := row.Scan(&job.ID, &job.InputPath, &targetType, &isModify, &job.Status, &priority, &groupKey, &stackName, &commandJSON, &createdAt)
 	if err != nil {
 		return nil, err
 	}
 
 	job.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	job.IsModify = isModify != 0
+	if priority.Valid {
+		job.Priority = int(priority.Int64)
+	}
 	if targetType.Valid {
 		job.TargetType = targetType.String
 	}
@@ -534,11 +574,12 @@ func scanFullJob(row *sql.Row) (*Job, error) {
 	var job Job
 	var createdAt string
 	var isModify int
-	var targetType, groupKey, stackName, commandJSON, startedAt, completedAt, errStr, stdout, stderr sql.NullString
+	var priority, claimedBy sql.NullInt64
+	var targetType, groupKey, stackName, instanceID, commandJSON, startedAt, completedAt, errStr, stdout, stderr sql.NullString
 	var exitCode, durationMs sql.NullInt64
 
 	err := row.Scan(
-		&job.ID, &job.InputPath, &targetType, &isModify, &job.Status, &groupKey, &stackName, &commandJSON, &createdAt,
+		&job.ID, &job.InputPath, &targetType, &isModify, &job.Status, &priority, &groupKey, &stackName, &instanceID, &claimedBy, &commandJSON, &createdAt,
 		&startedAt, &completedAt, &exitCode, &durationMs, &errStr, &stdout, &stderr,
 	)
 	if err != nil {
@@ -547,6 +588,9 @@ func scanFullJob(row *sql.Row) (*Job, error) {
 
 	job.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	job.IsModify = isModify != 0
+	if priority.Valid {
+		job.Priority = int(priority.Int64)
+	}
 
 	if targetType.Valid {
 		job.TargetType = targetType.String
@@ -556,6 +600,13 @@ func scanFullJob(row *sql.Row) (*Job, error) {
 	}
 	if stackName.Valid {
 		job.StackName = stackName.String
+	}
+	if instanceID.Valid {
+		job.InstanceID = instanceID.String
+	}
+	if claimedBy.Valid {
+		cb := int(claimedBy.Int64)
+		job.ClaimedBy = &cb
 	}
 	if commandJSON.Valid {
 		if err := json.Unmarshal([]byte(commandJSON.String), &job.Command); err != nil {
@@ -705,18 +756,18 @@ func (s *SQLiteStore) DequeueForStack(ctx context.Context, stackName string) (*J
 	var row *sql.Row
 	if stackName == "" {
 		row = tx.QueryRowContext(ctx, `
-			SELECT id, input_path, target_type, is_modify, status, group_key, stack_name, command, created_at
+			SELECT id, input_path, target_type, is_modify, status, priority, group_key, stack_name, command, created_at
 			FROM jobs
 			WHERE status = ? AND (stack_name IS NULL OR stack_name = '')
-			ORDER BY created_at ASC
+			ORDER BY priority DESC, created_at ASC
 			LIMIT 1
 		`, JobStatusPending)
 	} else {
 		row = tx.QueryRowContext(ctx, `
-			SELECT id, input_path, target_type, is_modify, status, group_key, stack_name, command, created_at
+			SELECT id, input_path, target_type, is_modify, status, priority, group_key, stack_name, command, created_at
 			FROM jobs
 			WHERE status = ? AND stack_name = ?
-			ORDER BY created_at ASC
+			ORDER BY priority DESC, created_at ASC
 			LIMIT 1
 		`, JobStatusPending, stackName)
 	}
@@ -777,4 +828,402 @@ func (s *SQLiteStore) GetStackStats(ctx context.Context) ([]StackStats, error) {
 	}
 
 	return stats, rows.Err()
+}
+
+// Priority management methods
+
+// SetPriority sets the priority of a pending job
+func (s *SQLiteStore) SetPriority(ctx context.Context, jobID string, priority int) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE jobs SET priority = ?
+		WHERE id = ? AND status = ?
+	`, priority, jobID, JobStatusPending)
+	if err != nil {
+		return err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("job %q not found or not in pending state", jobID)
+	}
+
+	return nil
+}
+
+// GetMaxPriority returns the maximum priority among pending jobs
+func (s *SQLiteStore) GetMaxPriority(ctx context.Context) (int, error) {
+	var maxPriority sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT MAX(priority) FROM jobs WHERE status = ?
+	`, JobStatusPending).Scan(&maxPriority)
+	if err != nil {
+		return 0, err
+	}
+	if !maxPriority.Valid {
+		return 0, nil
+	}
+	return int(maxPriority.Int64), nil
+}
+
+// GetMinPriority returns the minimum priority among pending jobs
+func (s *SQLiteStore) GetMinPriority(ctx context.Context) (int, error) {
+	var minPriority sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT MIN(priority) FROM jobs WHERE status = ?
+	`, JobStatusPending).Scan(&minPriority)
+	if err != nil {
+		return 0, err
+	}
+	if !minPriority.Valid {
+		return 0, nil
+	}
+	return int(minPriority.Int64), nil
+}
+
+// GetNextPendingJob returns the next job that would be dequeued (without marking it as running)
+func (s *SQLiteStore) GetNextPendingJob(ctx context.Context) (*Job, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, input_path, target_type, is_modify, status, priority, group_key, stack_name, instance_id, claimed_by, command, created_at,
+		       started_at, completed_at, exit_code, duration_ms, error, stdout, stderr
+		FROM jobs
+		WHERE status = ?
+		ORDER BY priority DESC, created_at ASC
+		LIMIT 1
+	`, JobStatusPending)
+
+	job, err := scanFullJob(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return job, err
+}
+
+// Process tracking methods
+
+// RegisterProcess registers a running filehook process
+func (s *SQLiteStore) RegisterProcess(ctx context.Context, info *ProcessInfo) error {
+	role := info.Role
+	if role == "" {
+		role = ProcessRoleLegacy
+	}
+	now := time.Now()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO process_info (pid, command, started_at, role, instance_id, heartbeat_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, info.PID, info.Command, info.StartedAt.Format(time.RFC3339Nano), string(role), info.InstanceID, now.Format(time.RFC3339Nano))
+	return err
+}
+
+// UnregisterProcess removes a process registration
+func (s *SQLiteStore) UnregisterProcess(ctx context.Context, pid int) error {
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM process_info WHERE pid = ?
+	`, pid)
+	return err
+}
+
+// GetActiveProcess returns the currently registered process, or nil if none is alive
+func (s *SQLiteStore) GetActiveProcess(ctx context.Context) (*ProcessInfo, error) {
+	processes, err := s.getAllProcesses(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, info := range processes {
+		if isProcessAlive(info.PID) {
+			return &info, nil
+		}
+		s.db.ExecContext(ctx, "DELETE FROM process_info WHERE pid = ?", info.PID)
+	}
+
+	return nil, nil
+}
+
+// GetActiveProcesses returns all live registered processes
+func (s *SQLiteStore) GetActiveProcesses(ctx context.Context) ([]ProcessInfo, error) {
+	processes, err := s.getAllProcesses(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var alive []ProcessInfo
+	for _, info := range processes {
+		if isProcessAlive(info.PID) {
+			alive = append(alive, info)
+		} else {
+			s.db.ExecContext(ctx, "DELETE FROM process_info WHERE pid = ?", info.PID)
+		}
+	}
+
+	return alive, nil
+}
+
+// GetSchedulerProcess returns the live scheduler process, or nil
+func (s *SQLiteStore) GetSchedulerProcess(ctx context.Context) (*ProcessInfo, error) {
+	processes, err := s.getAllProcesses(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, info := range processes {
+		if info.Role == ProcessRoleScheduler {
+			if isProcessAlive(info.PID) {
+				return &info, nil
+			}
+			s.db.ExecContext(ctx, "DELETE FROM process_info WHERE pid = ?", info.PID)
+		}
+	}
+
+	return nil, nil
+}
+
+// UpdateHeartbeat updates the heartbeat timestamp for a process
+func (s *SQLiteStore) UpdateHeartbeat(ctx context.Context, pid int) error {
+	now := time.Now()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE process_info SET heartbeat_at = ? WHERE pid = ?
+	`, now.Format(time.RFC3339Nano), pid)
+	return err
+}
+
+func (s *SQLiteStore) getAllProcesses(ctx context.Context) ([]ProcessInfo, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT pid, command, started_at, role, instance_id, heartbeat_at FROM process_info
+	`)
+	if err != nil {
+		return nil, err
+	}
+
+	var processes []ProcessInfo
+	for rows.Next() {
+		var info ProcessInfo
+		var startedAt string
+		var role, instanceID, heartbeatAt sql.NullString
+		if err := rows.Scan(&info.PID, &info.Command, &startedAt, &role, &instanceID, &heartbeatAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		info.StartedAt, _ = time.Parse(time.RFC3339Nano, startedAt)
+		if role.Valid {
+			info.Role = ProcessRole(role.String)
+		} else {
+			info.Role = ProcessRoleLegacy
+		}
+		if instanceID.Valid {
+			info.InstanceID = instanceID.String
+		}
+		if heartbeatAt.Valid {
+			info.HeartbeatAt, _ = time.Parse(time.RFC3339Nano, heartbeatAt.String)
+		}
+		processes = append(processes, info)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	return processes, nil
+}
+
+// DequeueWithClaim dequeues the next pending job and sets claimed_by
+func (s *SQLiteStore) DequeueWithClaim(ctx context.Context, claimerPID int) (*Job, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, input_path, target_type, is_modify, status, priority, group_key, stack_name, command, created_at
+		FROM jobs
+		WHERE status = ?
+		ORDER BY priority DESC, created_at ASC
+		LIMIT 1
+	`, JobStatusPending)
+
+	job, err := scanJob(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	job.StartedAt = &now
+	job.Status = JobStatusRunning
+	job.ClaimedBy = &claimerPID
+
+	_, err = tx.ExecContext(ctx, `
+		UPDATE jobs SET status = ?, started_at = ?, claimed_by = ?
+		WHERE id = ?
+	`, job.Status, now.Format(time.RFC3339Nano), claimerPID, job.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return job, nil
+}
+
+// DequeueForStackWithClaim dequeues the next pending job for a stack and sets claimed_by
+func (s *SQLiteStore) DequeueForStackWithClaim(ctx context.Context, stackName string, claimerPID int) (*Job, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var row *sql.Row
+	if stackName == "" {
+		row = tx.QueryRowContext(ctx, `
+			SELECT id, input_path, target_type, is_modify, status, priority, group_key, stack_name, command, created_at
+			FROM jobs
+			WHERE status = ? AND (stack_name IS NULL OR stack_name = '')
+			ORDER BY priority DESC, created_at ASC
+			LIMIT 1
+		`, JobStatusPending)
+	} else {
+		row = tx.QueryRowContext(ctx, `
+			SELECT id, input_path, target_type, is_modify, status, priority, group_key, stack_name, command, created_at
+			FROM jobs
+			WHERE status = ? AND stack_name = ?
+			ORDER BY priority DESC, created_at ASC
+			LIMIT 1
+		`, JobStatusPending, stackName)
+	}
+
+	job, err := scanJob(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	job.StartedAt = &now
+	job.Status = JobStatusRunning
+	job.ClaimedBy = &claimerPID
+
+	_, err = tx.ExecContext(ctx, `
+		UPDATE jobs SET status = ?, started_at = ?, claimed_by = ?
+		WHERE id = ?
+	`, job.Status, now.Format(time.RFC3339Nano), claimerPID, job.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return job, nil
+}
+
+// CleanupStaleRunningForPID resets running jobs claimed by a specific dead PID
+func (s *SQLiteStore) CleanupStaleRunningForPID(ctx context.Context, pid int) (int, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE jobs
+		SET status = ?, started_at = NULL, claimed_by = NULL
+		WHERE status = ? AND claimed_by = ?
+	`, JobStatusPending, JobStatusRunning, pid)
+	if err != nil {
+		return 0, err
+	}
+
+	affected, err := result.RowsAffected()
+	return int(affected), err
+}
+
+// ListPendingByInstance returns pending jobs filtered by instance ID
+func (s *SQLiteStore) ListPendingByInstance(ctx context.Context, instanceID string, limit int) ([]JobSummary, error) {
+	query := `
+		SELECT id, input_path, status, priority, group_key, stack_name, instance_id, created_at, error
+		FROM jobs
+		WHERE status = ? AND instance_id = ?
+		ORDER BY priority DESC, created_at ASC
+	`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, JobStatusPending, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanJobSummaries(rows)
+}
+
+// SetPriorityByInstance sets priority only if the job belongs to the given instance
+func (s *SQLiteStore) SetPriorityByInstance(ctx context.Context, jobID string, instanceID string, priority int) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE jobs SET priority = ?
+		WHERE id = ? AND status = ? AND instance_id = ?
+	`, priority, jobID, JobStatusPending, instanceID)
+	if err != nil {
+		return err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("job %q not found, not pending, or not from instance %q", jobID, instanceID)
+	}
+
+	return nil
+}
+
+// GetStatsByInstance returns queue stats filtered by instance ID
+func (s *SQLiteStore) GetStatsByInstance(ctx context.Context, instanceID string) (*QueueStats, error) {
+	stats := &QueueStats{}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT status, COUNT(*) FROM jobs WHERE instance_id = ? GROUP BY status
+	`, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+
+		switch JobStatus(status) {
+		case JobStatusPending:
+			stats.Pending = count
+		case JobStatusRunning:
+			stats.Running = count
+		case JobStatusCompleted:
+			stats.Completed = count
+		case JobStatusFailed:
+			stats.Failed = count
+		}
+		stats.Total += count
+	}
+
+	return stats, rows.Err()
+}
+
+// isProcessAlive checks if a process with the given PID is still running
+func isProcessAlive(pid int) bool {
+	// On Unix systems, sending signal 0 checks if process exists without affecting it
+	// This returns nil if process exists and we have permission, error otherwise
+	err := syscall.Kill(pid, 0)
+	return err == nil
 }

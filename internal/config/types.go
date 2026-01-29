@@ -31,10 +31,23 @@ type StacksConfig struct {
 	Default     string            `yaml:"default"` // Default stack when pattern has none
 }
 
-// StackDefinition defines a single stack with its switch script
+// StackDefinition defines a single stack with its switch command
 type StackDefinition struct {
-	Name         string `yaml:"name"`
-	SwitchScript string `yaml:"switch_script"`
+	Name          string   `yaml:"name"`
+	SwitchScript  string   `yaml:"switch_script"`  // deprecated: use switch_command
+	SwitchCommand []string `yaml:"switch_command"`
+}
+
+// GetSwitchCommand returns the command to run for switching to this stack.
+// Prefers switch_command; falls back to switch_script as a single executable.
+func (sd *StackDefinition) GetSwitchCommand() []string {
+	if len(sd.SwitchCommand) > 0 {
+		return sd.SwitchCommand
+	}
+	if sd.SwitchScript != "" {
+		return []string{sd.SwitchScript}
+	}
+	return nil
 }
 
 // WatchConfig defines what paths to watch

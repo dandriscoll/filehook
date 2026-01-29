@@ -62,6 +62,40 @@ type Store interface {
 	// (e.g., after a crash)
 	CleanupStaleRunning(ctx context.Context) (int, error)
 
+	// Priority management methods
+
+	// SetPriority sets the priority of a pending job
+	SetPriority(ctx context.Context, jobID string, priority int) error
+
+	// GetMaxPriority returns the maximum priority among pending jobs
+	GetMaxPriority(ctx context.Context) (int, error)
+
+	// GetMinPriority returns the minimum priority among pending jobs
+	GetMinPriority(ctx context.Context) (int, error)
+
+	// GetNextPendingJob returns the next job that would be dequeued (without marking it as running)
+	GetNextPendingJob(ctx context.Context) (*Job, error)
+
+	// Process tracking methods
+
+	// RegisterProcess registers a running filehook process
+	RegisterProcess(ctx context.Context, info *ProcessInfo) error
+
+	// UnregisterProcess removes a process registration
+	UnregisterProcess(ctx context.Context, pid int) error
+
+	// GetActiveProcess returns the currently registered process, or nil if none
+	GetActiveProcess(ctx context.Context) (*ProcessInfo, error)
+
+	// GetActiveProcesses returns all live registered processes
+	GetActiveProcesses(ctx context.Context) ([]ProcessInfo, error)
+
+	// GetSchedulerProcess returns the live scheduler process, or nil if none
+	GetSchedulerProcess(ctx context.Context) (*ProcessInfo, error)
+
+	// UpdateHeartbeat updates the heartbeat timestamp for a process
+	UpdateHeartbeat(ctx context.Context, pid int) error
+
 	// Stack mode methods
 
 	// GetStackState returns the current stack state
@@ -81,4 +115,26 @@ type Store interface {
 
 	// GetStackStats returns statistics for all stacks
 	GetStackStats(ctx context.Context) ([]StackStats, error)
+
+	// Claim-aware dequeue methods (for central scheduler)
+
+	// DequeueWithClaim dequeues the next pending job and sets claimed_by
+	DequeueWithClaim(ctx context.Context, claimerPID int) (*Job, error)
+
+	// DequeueForStackWithClaim dequeues the next pending job for a stack and sets claimed_by
+	DequeueForStackWithClaim(ctx context.Context, stackName string, claimerPID int) (*Job, error)
+
+	// CleanupStaleRunningForPID resets running jobs claimed by a specific dead PID
+	CleanupStaleRunningForPID(ctx context.Context, pid int) (int, error)
+
+	// Instance-filtered queries
+
+	// ListPendingByInstance returns pending jobs filtered by instance ID
+	ListPendingByInstance(ctx context.Context, instanceID string, limit int) ([]JobSummary, error)
+
+	// SetPriorityByInstance sets priority only if the job belongs to the given instance
+	SetPriorityByInstance(ctx context.Context, jobID string, instanceID string, priority int) error
+
+	// GetStatsByInstance returns queue stats filtered by instance ID
+	GetStatsByInstance(ctx context.Context, instanceID string) (*QueueStats, error)
 }

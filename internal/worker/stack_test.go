@@ -185,6 +185,75 @@ func (m *mockStore) GetStackStats(ctx context.Context) ([]queue.StackStats, erro
 	return stats, nil
 }
 
+// Priority management methods (stubs for testing)
+func (m *mockStore) SetPriority(ctx context.Context, jobID string, priority int) error {
+	if job, ok := m.jobs[jobID]; ok {
+		job.Priority = priority
+	}
+	return nil
+}
+
+func (m *mockStore) GetMaxPriority(ctx context.Context) (int, error) {
+	return 0, nil
+}
+
+func (m *mockStore) GetMinPriority(ctx context.Context) (int, error) {
+	return 0, nil
+}
+
+func (m *mockStore) GetNextPendingJob(ctx context.Context) (*queue.Job, error) {
+	return nil, nil
+}
+
+// Process tracking methods (stubs for testing)
+func (m *mockStore) RegisterProcess(ctx context.Context, info *queue.ProcessInfo) error {
+	return nil
+}
+
+func (m *mockStore) UnregisterProcess(ctx context.Context, pid int) error {
+	return nil
+}
+
+func (m *mockStore) GetActiveProcess(ctx context.Context) (*queue.ProcessInfo, error) {
+	return nil, nil
+}
+
+func (m *mockStore) GetActiveProcesses(ctx context.Context) ([]queue.ProcessInfo, error) {
+	return nil, nil
+}
+
+func (m *mockStore) GetSchedulerProcess(ctx context.Context) (*queue.ProcessInfo, error) {
+	return nil, nil
+}
+
+func (m *mockStore) UpdateHeartbeat(ctx context.Context, pid int) error {
+	return nil
+}
+
+func (m *mockStore) DequeueWithClaim(ctx context.Context, claimerPID int) (*queue.Job, error) {
+	return m.Dequeue(ctx)
+}
+
+func (m *mockStore) DequeueForStackWithClaim(ctx context.Context, stackName string, claimerPID int) (*queue.Job, error) {
+	return m.DequeueForStack(ctx, stackName)
+}
+
+func (m *mockStore) CleanupStaleRunningForPID(ctx context.Context, pid int) (int, error) {
+	return 0, nil
+}
+
+func (m *mockStore) ListPendingByInstance(ctx context.Context, instanceID string, limit int) ([]queue.JobSummary, error) {
+	return nil, nil
+}
+
+func (m *mockStore) SetPriorityByInstance(ctx context.Context, jobID string, instanceID string, priority int) error {
+	return nil
+}
+
+func (m *mockStore) GetStatsByInstance(ctx context.Context, instanceID string) (*queue.QueueStats, error) {
+	return &queue.QueueStats{}, nil
+}
+
 func TestStackSchedulerSelectNextStack(t *testing.T) {
 	// Create a temporary directory for scripts
 	tmpDir, err := os.MkdirTemp("", "filehook-test-*")

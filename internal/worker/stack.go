@@ -175,15 +175,23 @@ func (s *StackScheduler) switchToStack(ctx context.Context, stackName string) er
 		return fmt.Errorf("stack %q not defined", stackName)
 	}
 
-	scriptPath := s.cfg.ResolvePath(stackDef.SwitchScript)
-	s.logger.Printf("stack-scheduler: switching to stack %s (running %s)", stackName, scriptPath)
-	s.debugLogger.Log("Stack switch: %s -> %s (script: %s)", s.currentStack, stackName, scriptPath)
+	switchCmd := stackDef.GetSwitchCommand()
+	if len(switchCmd) == 0 {
+		return fmt.Errorf("stack %q has no switch command defined", stackName)
+	}
+
+	resolved := make([]string, len(switchCmd))
+	copy(resolved, switchCmd)
+	resolved[0] = s.cfg.ResolvePath(resolved[0])
+
+	s.logger.Printf("stack-scheduler: switching to stack %s (running %v)", stackName, resolved)
+	s.debugLogger.Log("Stack switch: %s -> %s (cmd: %v)", s.currentStack, stackName, resolved)
 
 	start := time.Now()
 
-	// Execute the switch script
+	// Execute the switch command
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, scriptPath)
+	cmd := exec.CommandContext(ctx, resolved[0], resolved[1:]...)
 	cmd.Dir = s.cfg.ConfigDir
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

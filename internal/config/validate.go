@@ -159,26 +159,27 @@ func validateStackMode(cfg *Config) []error {
 		}
 		stackNames[def.Name] = true
 
-		if def.SwitchScript == "" {
+		switchCmd := def.GetSwitchCommand()
+		if len(switchCmd) == 0 {
 			errs = append(errs, ValidationError{
-				Field:   fmt.Sprintf("stacks.definitions[%d].switch_script", i),
-				Message: "switch_script is required",
+				Field:   fmt.Sprintf("stacks.definitions[%d]", i),
+				Message: "switch_command or switch_script is required",
 			})
 		} else {
-			// Validate switch script exists and is executable
-			scriptPath := cfg.ResolvePath(def.SwitchScript)
-			info, err := os.Stat(scriptPath)
+			// Validate the executable exists and is executable
+			execPath := cfg.ResolvePath(switchCmd[0])
+			info, err := os.Stat(execPath)
 			if os.IsNotExist(err) {
 				errs = append(errs, ValidationError{
-					Field:   fmt.Sprintf("stacks.definitions[%d].switch_script", i),
-					Message: fmt.Sprintf("script not found: %s", scriptPath),
+					Field:   fmt.Sprintf("stacks.definitions[%d].switch_command", i),
+					Message: fmt.Sprintf("executable not found: %s", execPath),
 				})
 			} else if err == nil {
 				// Check if executable (Unix permissions)
 				if info.Mode()&0111 == 0 {
 					errs = append(errs, ValidationError{
-						Field:   fmt.Sprintf("stacks.definitions[%d].switch_script", i),
-						Message: fmt.Sprintf("script is not executable: %s", scriptPath),
+						Field:   fmt.Sprintf("stacks.definitions[%d].switch_command", i),
+						Message: fmt.Sprintf("file is not executable: %s", execPath),
 					})
 				}
 			}

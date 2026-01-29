@@ -14,6 +14,15 @@ const (
 	JobStatusFailed    JobStatus = "failed"
 )
 
+// ProcessRole represents the role of a registered process
+type ProcessRole string
+
+const (
+	ProcessRoleProducer  ProcessRole = "producer"
+	ProcessRoleScheduler ProcessRole = "scheduler"
+	ProcessRoleLegacy    ProcessRole = "legacy"
+)
+
 // Job represents a file processing job
 type Job struct {
 	ID          string     `json:"id"`
@@ -22,8 +31,11 @@ type Job struct {
 	TargetType  string     `json:"target_type,omitempty"`
 	IsModify    bool       `json:"is_modify,omitempty"` // True if this was a file modification event
 	Status      JobStatus  `json:"status"`
+	Priority    int        `json:"priority"`            // Higher priority = processed first (default 0)
 	GroupKey    string     `json:"group_key,omitempty"`
 	StackName   string     `json:"stack_name,omitempty"` // Which stack this job requires (for stack mode)
+	InstanceID  string     `json:"instance_id,omitempty"`
+	ClaimedBy   *int       `json:"claimed_by,omitempty"`
 	Command     []string   `json:"command,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	StartedAt   *time.Time `json:"started_at,omitempty"`
@@ -37,25 +49,29 @@ type Job struct {
 
 // JobSummary is a brief representation of a job for listing
 type JobSummary struct {
-	ID        string    `json:"id"`
-	InputPath string    `json:"input_path"`
-	Status    JobStatus `json:"status"`
-	GroupKey  string    `json:"group_key,omitempty"`
-	StackName string    `json:"stack_name,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	Error     string    `json:"error,omitempty"`
+	ID         string    `json:"id"`
+	InputPath  string    `json:"input_path"`
+	Status     JobStatus `json:"status"`
+	Priority   int       `json:"priority"`
+	GroupKey   string    `json:"group_key,omitempty"`
+	StackName  string    `json:"stack_name,omitempty"`
+	InstanceID string    `json:"instance_id,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	Error      string    `json:"error,omitempty"`
 }
 
 // ToSummary converts a Job to a JobSummary
 func (j *Job) ToSummary() JobSummary {
 	return JobSummary{
-		ID:        j.ID,
-		InputPath: j.InputPath,
-		Status:    j.Status,
-		GroupKey:  j.GroupKey,
-		StackName: j.StackName,
-		CreatedAt: j.CreatedAt,
-		Error:     j.Error,
+		ID:         j.ID,
+		InputPath:  j.InputPath,
+		Status:     j.Status,
+		Priority:   j.Priority,
+		GroupKey:   j.GroupKey,
+		StackName:  j.StackName,
+		InstanceID: j.InstanceID,
+		CreatedAt:  j.CreatedAt,
+		Error:      j.Error,
 	}
 }
 
@@ -93,4 +109,35 @@ type StackStats struct {
 	SwitchCount           int
 	TotalSwitchDurationMs int64
 	AvgSwitchDurationMs   int64 // computed
+}
+
+// ProcessState represents the state of the filehook process
+type ProcessState string
+
+const (
+	ProcessStateNotRunning ProcessState = "not_running" // No filehook process is active
+	ProcessStateIdle       ProcessState = "idle"        // Process is active but no work to do
+	ProcessStateProcessing ProcessState = "processing"  // Process is active and processing/has pending work
+)
+
+// ProcessInfo holds information about a running filehook process
+type ProcessInfo struct {
+	PID         int         `json:"pid"`
+	Command     string      `json:"command"` // "watch", "run", or "serve"
+	Role        ProcessRole `json:"role"`
+	InstanceID  string      `json:"instance_id,omitempty"`
+	StartedAt   time.Time   `json:"started_at"`
+	HeartbeatAt time.Time   `json:"heartbeat_at"`
+}
+
+// FullStatus holds complete status information for API consumers
+type FullStatus struct {
+	State       ProcessState  `json:"state"`
+	Process     *ProcessInfo  `json:"process,omitempty"` // Kept for backward compat
+	Scheduler   *ProcessInfo  `json:"scheduler,omitempty"`
+	Producers   []ProcessInfo `json:"producers,omitempty"`
+	Stats       *QueueStats   `json:"stats"`
+	CurrentJob  *JobSummary   `json:"current_job,omitempty"`  // Currently running job (if any)
+	NextJob     *JobSummary   `json:"next_job,omitempty"`     // Next job to be processed (if any)
+	QueueLength int           `json:"queue_length"`           // Number of pending jobs
 }

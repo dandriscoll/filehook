@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/dandriscoll/filehook/internal/config"
 	"github.com/dandriscoll/filehook/internal/debug"
@@ -18,8 +19,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var runOne bool
-var runPattern string
+var (
+	runOne              bool
+	runPattern          string
+	runInstanceID       string
+	runDefaultPriority  int
+)
 
 var runCmd = &cobra.Command{
 	Use:   "run",
@@ -31,6 +36,8 @@ var runCmd = &cobra.Command{
 func init() {
 	runCmd.Flags().BoolVar(&runOne, "run-one", false, "process only the first job and exit")
 	runCmd.Flags().StringVarP(&runPattern, "pattern", "p", "", "only process files matching the named pattern")
+	runCmd.Flags().StringVar(&runInstanceID, "instance", "", "instance name for job tagging (default: config file basename)")
+	runCmd.Flags().IntVar(&runDefaultPriority, "priority", 0, "default priority for all jobs from this instance")
 	rootCmd.AddCommand(runCmd)
 }
 
@@ -92,14 +99,49 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to initialize queue: %w", err)
 	}
 
-	// Cleanup stale running jobs
-	cleaned, err := store.CleanupStaleRunning(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to cleanup stale jobs: %w", err)
+	// Resolve instance ID
+	instanceID := resolveInstanceID(runInstanceID, cfgFile)
+
+	// Check for a live scheduler to determine mode
+	schedulerProc, _ := store.GetSchedulerProcess(ctx)
+	producerMode := schedulerProc != nil
+
+	if producerMode {
+		logger.Printf("Scheduler detected (PID %d), running in producer mode", schedulerProc.PID)
+	} else {
+		logger.Println("No scheduler detected, running in legacy mode")
+		// Cleanup stale running jobs
+		cleaned, err := store.CleanupStaleRunning(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to cleanup stale jobs: %w", err)
+		}
+		if cleaned > 0 {
+			logger.Printf("Reset %d stale running jobs to pending", cleaned)
+		}
 	}
-	if cleaned > 0 {
-		logger.Printf("Reset %d stale running jobs to pending", cleaned)
+
+	// Register this process
+	pid := os.Getpid()
+	role := queue.ProcessRoleLegacy
+	if producerMode {
+		role = queue.ProcessRoleProducer
 	}
+	processInfo := &queue.ProcessInfo{
+		PID:        pid,
+		Command:    "run",
+		Role:       role,
+		InstanceID: instanceID,
+		StartedAt:  time.Now(),
+	}
+	if err := store.RegisterProcess(ctx, processInfo); err != nil {
+		logger.Printf("Warning: failed to register process: %v", err)
+	}
+	defer func() {
+		// Unregister on shutdown
+		if err := store.UnregisterProcess(context.Background(), pid); err != nil {
+			logger.Printf("Warning: failed to unregister process: %v", err)
+		}
+	}()
 
 	// Initialize plugins
 	namingPlugin, err := plugin.NewNamingPlugin(cfg, debugLogger)
@@ -127,12 +169,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 		logger.Println("Scanning for input files...")
 	}
 
+	evtOpts := eventOptions{instanceID: instanceID, defaultPriority: runDefaultPriority}
+
 	// Start consuming events in a goroutine
 	eventsDone := make(chan struct{})
 	go func() {
 		defer close(eventsDone)
 		for event := range w.Events() {
-			if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger); err != nil {
+			if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger, evtOpts); err != nil {
 				logger.Printf("Error processing %s: %v", event.Path, err)
 			}
 		}
@@ -157,6 +201,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	if stats.Pending == 0 {
 		logger.Println("No jobs to process")
+		return nil
+	}
+
+	// In producer mode, just enqueue and exit
+	if producerMode {
+		logger.Printf("Producer mode: enqueued %d jobs for scheduler to process", stats.Pending)
 		return nil
 	}
 
