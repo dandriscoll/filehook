@@ -130,9 +130,10 @@ func (e *Executor) Execute(ctx context.Context, job *queue.Job) *queue.JobResult
 	duration := time.Since(start)
 
 	result := &queue.JobResult{
-		Stdout:     stdout.String(),
-		Stderr:     stderr.String(),
-		DurationMs: duration.Milliseconds(),
+		Stdout:      stdout.String(),
+		Stderr:      stderr.String(),
+		DurationMs:  duration.Milliseconds(),
+		OutputPaths: job.OutputPaths,
 	}
 
 	if err != nil {

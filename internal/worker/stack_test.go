@@ -126,6 +126,10 @@ func (m *mockStore) HasPendingOrRunning(ctx context.Context, inputPath string) (
 	return false, nil
 }
 
+func (m *mockStore) HasPending(ctx context.Context, inputPath string) (bool, error) {
+	return false, nil
+}
+
 func (m *mockStore) CleanupStaleRunning(ctx context.Context) (int, error) {
 	return 0, nil
 }

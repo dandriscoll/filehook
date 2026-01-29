@@ -109,6 +109,7 @@ func (s *SQLiteStore) Initialize(ctx context.Context) error {
 		"ALTER TABLE jobs ADD COLUMN priority INTEGER DEFAULT 0",
 		"ALTER TABLE jobs ADD COLUMN instance_id TEXT",
 		"ALTER TABLE jobs ADD COLUMN claimed_by INTEGER",
+		"ALTER TABLE jobs ADD COLUMN output_paths TEXT",
 		"ALTER TABLE process_info ADD COLUMN role TEXT DEFAULT 'legacy'",
 		"ALTER TABLE process_info ADD COLUMN instance_id TEXT",
 		"ALTER TABLE process_info ADD COLUMN heartbeat_at TEXT",
@@ -138,13 +139,14 @@ func (s *SQLiteStore) Close() error {
 
 // Enqueue adds a new job to the queue
 func (s *SQLiteStore) Enqueue(ctx context.Context, job *Job) error {
-	// Check for existing pending/running job
-	exists, err := s.HasPendingOrRunning(ctx, job.InputPath)
+	// Check for existing pending job — allow enqueuing even if a job is currently
+	// running, so that edits made during processing are not lost
+	exists, err := s.HasPending(ctx, job.InputPath)
 	if err != nil {
 		return err
 	}
 	if exists {
-		return fmt.Errorf("job for %q is already pending or running", job.InputPath)
+		return fmt.Errorf("job for %q is already pending", job.InputPath)
 	}
 
 	if job.ID == "" {
@@ -286,12 +288,18 @@ func (s *SQLiteStore) DequeueForGroup(ctx context.Context, groupKey string) (*Jo
 // Complete marks a job as completed
 func (s *SQLiteStore) Complete(ctx context.Context, jobID string, result *JobResult) error {
 	now := time.Now()
+	var outputPathsJSON *string
+	if len(result.OutputPaths) > 0 {
+		b, _ := json.Marshal(result.OutputPaths)
+		s := string(b)
+		outputPathsJSON = &s
+	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE jobs
-		SET status = ?, completed_at = ?, exit_code = ?, duration_ms = ?, stdout = ?, stderr = ?
+		SET status = ?, completed_at = ?, exit_code = ?, duration_ms = ?, stdout = ?, stderr = ?, output_paths = ?
 		WHERE id = ?
 	`, JobStatusCompleted, now.Format(time.RFC3339Nano), result.ExitCode, result.DurationMs,
-		result.Stdout, result.Stderr, jobID)
+		result.Stdout, result.Stderr, outputPathsJSON, jobID)
 	return err
 }
 
@@ -302,12 +310,18 @@ func (s *SQLiteStore) Fail(ctx context.Context, jobID string, result *JobResult)
 	if result.Error != nil {
 		errStr = result.Error.Error()
 	}
+	var outputPathsJSON *string
+	if len(result.OutputPaths) > 0 {
+		b, _ := json.Marshal(result.OutputPaths)
+		s := string(b)
+		outputPathsJSON = &s
+	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE jobs
-		SET status = ?, completed_at = ?, exit_code = ?, duration_ms = ?, stdout = ?, stderr = ?, error = ?
+		SET status = ?, completed_at = ?, exit_code = ?, duration_ms = ?, stdout = ?, stderr = ?, error = ?, output_paths = ?
 		WHERE id = ?
 	`, JobStatusFailed, now.Format(time.RFC3339Nano), result.ExitCode, result.DurationMs,
-		result.Stdout, result.Stderr, errStr, jobID)
+		result.Stdout, result.Stderr, errStr, outputPathsJSON, jobID)
 	return err
 }
 
@@ -315,7 +329,7 @@ func (s *SQLiteStore) Fail(ctx context.Context, jobID string, result *JobResult)
 func (s *SQLiteStore) Get(ctx context.Context, jobID string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, input_path, target_type, is_modify, status, priority, group_key, stack_name, instance_id, claimed_by, command, created_at,
-		       started_at, completed_at, exit_code, duration_ms, error, stdout, stderr
+		       started_at, completed_at, exit_code, duration_ms, output_paths, error, stdout, stderr
 		FROM jobs
 		WHERE id = ?
 	`, jobID)
@@ -327,7 +341,7 @@ func (s *SQLiteStore) Get(ctx context.Context, jobID string) (*Job, error) {
 func (s *SQLiteStore) GetByInputPath(ctx context.Context, inputPath string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, input_path, target_type, is_modify, status, priority, group_key, stack_name, instance_id, claimed_by, command, created_at,
-		       started_at, completed_at, exit_code, duration_ms, error, stdout, stderr
+		       started_at, completed_at, exit_code, duration_ms, output_paths, error, stdout, stderr
 		FROM jobs
 		WHERE input_path = ? AND status IN (?, ?)
 		LIMIT 1
@@ -358,7 +372,7 @@ func (s *SQLiteStore) ListRunning(ctx context.Context) ([]JobSummary, error) {
 // ListRecentlyCompleted returns recently completed jobs ordered by completion time descending
 func (s *SQLiteStore) ListRecentlyCompleted(ctx context.Context, limit int) ([]JobSummary, error) {
 	query := `
-		SELECT id, input_path, status, priority, group_key, stack_name, instance_id, created_at, completed_at, duration_ms, error
+		SELECT id, input_path, status, priority, group_key, stack_name, instance_id, created_at, completed_at, duration_ms, output_paths, error
 		FROM jobs
 		WHERE status = ?
 		ORDER BY completed_at DESC
@@ -378,7 +392,7 @@ func (s *SQLiteStore) ListRecentlyCompleted(ctx context.Context, limit int) ([]J
 
 func (s *SQLiteStore) listByStatus(ctx context.Context, status JobStatus, limit int) ([]JobSummary, error) {
 	query := `
-		SELECT id, input_path, status, priority, group_key, stack_name, instance_id, created_at, completed_at, duration_ms, error
+		SELECT id, input_path, status, priority, group_key, stack_name, instance_id, created_at, completed_at, duration_ms, output_paths, error
 		FROM jobs
 		WHERE status = ?
 		ORDER BY priority DESC, created_at ASC
@@ -402,9 +416,9 @@ func scanJobSummaries(rows *sql.Rows) ([]JobSummary, error) {
 		var js JobSummary
 		var createdAt string
 		var priority, durationMs sql.NullInt64
-		var groupKey, stackName, instanceID, completedAt, errStr sql.NullString
+		var groupKey, stackName, instanceID, completedAt, outputPathsJSON, errStr sql.NullString
 
-		if err := rows.Scan(&js.ID, &js.InputPath, &js.Status, &priority, &groupKey, &stackName, &instanceID, &createdAt, &completedAt, &durationMs, &errStr); err != nil {
+		if err := rows.Scan(&js.ID, &js.InputPath, &js.Status, &priority, &groupKey, &stackName, &instanceID, &createdAt, &completedAt, &durationMs, &outputPathsJSON, &errStr); err != nil {
 			return nil, err
 		}
 
@@ -427,6 +441,9 @@ func scanJobSummaries(rows *sql.Rows) ([]JobSummary, error) {
 		}
 		if durationMs.Valid {
 			js.DurationMs = &durationMs.Int64
+		}
+		if outputPathsJSON.Valid {
+			json.Unmarshal([]byte(outputPathsJSON.String), &js.OutputPaths)
 		}
 		if errStr.Valid {
 			js.Error = errStr.String
@@ -546,6 +563,16 @@ func (s *SQLiteStore) HasPendingOrRunning(ctx context.Context, inputPath string)
 	return count > 0, err
 }
 
+// HasPending checks if a pending job exists for the input path
+func (s *SQLiteStore) HasPending(ctx context.Context, inputPath string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM jobs
+		WHERE input_path = ? AND status = ?
+	`, inputPath, JobStatusPending).Scan(&count)
+	return count > 0, err
+}
+
 // CleanupStaleRunning resets jobs that were running but never completed
 func (s *SQLiteStore) CleanupStaleRunning(ctx context.Context) (int, error) {
 	result, err := s.db.ExecContext(ctx, `
@@ -603,12 +630,12 @@ func scanFullJob(row *sql.Row) (*Job, error) {
 	var createdAt string
 	var isModify int
 	var priority, claimedBy sql.NullInt64
-	var targetType, groupKey, stackName, instanceID, commandJSON, startedAt, completedAt, errStr, stdout, stderr sql.NullString
+	var targetType, groupKey, stackName, instanceID, commandJSON, startedAt, completedAt, outputPathsJSON, errStr, stdout, stderr sql.NullString
 	var exitCode, durationMs sql.NullInt64
 
 	err := row.Scan(
 		&job.ID, &job.InputPath, &targetType, &isModify, &job.Status, &priority, &groupKey, &stackName, &instanceID, &claimedBy, &commandJSON, &createdAt,
-		&startedAt, &completedAt, &exitCode, &durationMs, &errStr, &stdout, &stderr,
+		&startedAt, &completedAt, &exitCode, &durationMs, &outputPathsJSON, &errStr, &stdout, &stderr,
 	)
 	if err != nil {
 		return nil, err
@@ -655,6 +682,9 @@ func scanFullJob(row *sql.Row) (*Job, error) {
 	}
 	if durationMs.Valid {
 		job.DurationMs = &durationMs.Int64
+	}
+	if outputPathsJSON.Valid {
+		json.Unmarshal([]byte(outputPathsJSON.String), &job.OutputPaths)
 	}
 	if errStr.Valid {
 		job.Error = errStr.String
@@ -915,7 +945,7 @@ func (s *SQLiteStore) GetMinPriority(ctx context.Context) (int, error) {
 func (s *SQLiteStore) GetNextPendingJob(ctx context.Context) (*Job, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, input_path, target_type, is_modify, status, priority, group_key, stack_name, instance_id, claimed_by, command, created_at,
-		       started_at, completed_at, exit_code, duration_ms, error, stdout, stderr
+		       started_at, completed_at, exit_code, duration_ms, output_paths, error, stdout, stderr
 		FROM jobs
 		WHERE status = ?
 		ORDER BY priority DESC, created_at ASC
@@ -1174,7 +1204,7 @@ func (s *SQLiteStore) CleanupStaleRunningForPID(ctx context.Context, pid int) (i
 // ListPendingByInstance returns pending jobs filtered by instance ID
 func (s *SQLiteStore) ListPendingByInstance(ctx context.Context, instanceID string, limit int) ([]JobSummary, error) {
 	query := `
-		SELECT id, input_path, status, priority, group_key, stack_name, instance_id, created_at, completed_at, duration_ms, error
+		SELECT id, input_path, status, priority, group_key, stack_name, instance_id, created_at, completed_at, duration_ms, output_paths, error
 		FROM jobs
 		WHERE status = ? AND instance_id = ?
 		ORDER BY priority DESC, created_at ASC

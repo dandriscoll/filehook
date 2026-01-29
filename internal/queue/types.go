@@ -59,22 +59,24 @@ type JobSummary struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 	DurationMs  *int64     `json:"duration_ms,omitempty"`
+	OutputPaths []string   `json:"output_paths,omitempty"`
 	Error       string     `json:"error,omitempty"`
 }
 
 // ToSummary converts a Job to a JobSummary
 func (j *Job) ToSummary() JobSummary {
 	return JobSummary{
-		ID:         j.ID,
-		InputPath:  j.InputPath,
-		Status:     j.Status,
-		Priority:   j.Priority,
-		GroupKey:   j.GroupKey,
-		StackName:  j.StackName,
+		ID:          j.ID,
+		InputPath:   j.InputPath,
+		Status:      j.Status,
+		Priority:    j.Priority,
+		GroupKey:    j.GroupKey,
+		StackName:   j.StackName,
 		InstanceID:  j.InstanceID,
 		CreatedAt:   j.CreatedAt,
 		CompletedAt: j.CompletedAt,
 		DurationMs:  j.DurationMs,
+		OutputPaths: j.OutputPaths,
 		Error:       j.Error,
 	}
 }
@@ -90,11 +92,12 @@ type QueueStats struct {
 
 // JobResult holds the result of a job execution
 type JobResult struct {
-	ExitCode   int
-	Stdout     string
-	Stderr     string
-	DurationMs int64
-	Error      error
+	ExitCode    int
+	Stdout      string
+	Stderr      string
+	DurationMs  int64
+	OutputPaths []string
+	Error       error
 }
 
 // StackState represents the current stack state (for stack mode)

@@ -55,6 +55,7 @@ Machine-readable output from `filehook state -c <config> --json`.
 | `created_at` | string | yes | RFC 3339 timestamp |
 | `completed_at` | string | no | RFC 3339 timestamp (present for completed/failed jobs) |
 | `duration_ms` | int | no | Execution wall-clock time in milliseconds (present for completed/failed jobs) |
+| `output_paths` | string[] | no | Output file paths produced by the job (present for completed/failed jobs that had outputs) |
 | `error` | string | no | Error message (failed jobs only) |
 
 ## `state` field semantics
@@ -117,7 +118,8 @@ Machine-readable output from `filehook state -c <config> --json`.
       "priority": 0,
       "created_at": "2026-01-29T10:03:00Z",
       "completed_at": "2026-01-29T10:03:12Z",
-      "duration_ms": 12450
+      "duration_ms": 12450,
+      "output_paths": ["/data/processed/done.parquet"]
     }
   ],
   "recently_failed": [

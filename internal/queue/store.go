@@ -61,6 +61,9 @@ type Store interface {
 	// HasPendingOrRunning checks if a job exists for the input path
 	HasPendingOrRunning(ctx context.Context, inputPath string) (bool, error)
 
+	// HasPending checks if a pending job exists for the input path
+	HasPending(ctx context.Context, inputPath string) (bool, error)
+
 	// CleanupStaleRunning resets jobs that were running but never completed
 	// (e.g., after a crash)
 	CleanupStaleRunning(ctx context.Context) (int, error)

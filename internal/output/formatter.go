@@ -62,7 +62,14 @@ func (f *Formatter) PrintJobSummaries(jobs []queue.JobSummary, title string) err
 			if job.DurationMs != nil {
 				dur = fmt.Sprintf(" in %s", formatMs(*job.DurationMs))
 			}
-			line = fmt.Sprintf("  %s  %s%s  (%s ago)", job.ID[:8], shortPath, dur, age)
+			out := ""
+			if len(job.OutputPaths) > 0 {
+				out = fmt.Sprintf(" -> %s", filepath.Base(job.OutputPaths[0]))
+				if len(job.OutputPaths) > 1 {
+					out += fmt.Sprintf(" (+%d)", len(job.OutputPaths)-1)
+				}
+			}
+			line = fmt.Sprintf("  %s  %s%s%s  (%s ago)", job.ID[:8], shortPath, out, dur, age)
 		} else {
 			age := FormatDuration(time.Since(job.CreatedAt))
 			line = fmt.Sprintf("  %s  %s  (%s ago)", job.ID[:8], shortPath, age)

@@ -309,8 +309,9 @@ func processEvent(
 	}
 	debugLogger.Event(eventType, event.Path, fmt.Sprintf("pattern=%v", event.Pattern != nil))
 
-	// Check if already pending/running
-	exists, err := store.HasPendingOrRunning(ctx, event.Path)
+	// Check if already pending — allow enqueuing even if a job is currently running,
+	// so that edits made during processing are not lost
+	exists, err := store.HasPending(ctx, event.Path)
 	if err != nil {
 		return fmt.Errorf("failed to check existing job: %w", err)
 	}
