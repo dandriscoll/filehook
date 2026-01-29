@@ -2,8 +2,6 @@ package worker
 
 import (
 	"context"
-	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,12 +9,13 @@ import (
 
 	"github.com/dandriscoll/filehook/internal/config"
 	"github.com/dandriscoll/filehook/internal/debug"
+	"github.com/dandriscoll/filehook/internal/output"
 	"github.com/dandriscoll/filehook/internal/queue"
 )
 
 // silentLogger returns a logger that discards all output
-func silentLogger() *log.Logger {
-	return log.New(io.Discard, "", 0)
+func silentLogger() *output.Logger {
+	return output.NewSilentLogger()
 }
 
 // mockStore implements queue.Store for testing

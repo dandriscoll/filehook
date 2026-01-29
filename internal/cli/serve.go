@@ -3,13 +3,13 @@ package cli
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/dandriscoll/filehook/internal/debug"
+	"github.com/dandriscoll/filehook/internal/output"
 	"github.com/dandriscoll/filehook/internal/plugin"
 	"github.com/dandriscoll/filehook/internal/queue"
 	"github.com/dandriscoll/filehook/internal/worker"
@@ -42,7 +42,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	// Setup logger
-	logger := log.New(os.Stdout, "[filehook] ", log.LstdFlags)
+	logger := output.NewLogger()
 
 	// Setup debug logger
 	debugLogger, err := debug.New(cfg.StateDirectory(), cfg.Debug)
@@ -52,7 +52,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	defer debugLogger.Close()
 
 	if cfg.Debug {
-		logger.Printf("Debug logging enabled: %s/debug.log", cfg.StateDirectory())
+		logger.Info("debug logging enabled: %s/debug.log", cfg.StateDirectory())
 	}
 
 	// Setup context with cancellation
@@ -64,7 +64,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		logger.Println("Shutting down...")
+		logger.Info("shutting down…")
 		cancel()
 	}()
 
@@ -92,17 +92,17 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Clean up stale entries from dead schedulers and their claimed jobs
 	allProcesses, err := store.GetActiveProcesses(ctx)
 	if err != nil {
-		logger.Printf("Warning: failed to get active processes: %v", err)
+		logger.Warn("failed to get active processes: %v", err)
 	}
 	// GetActiveProcesses already cleaned dead PIDs from process_info.
 	// Now clean up jobs claimed by PIDs that are no longer in the active list.
 	// We check all running jobs with claimed_by set.
 	cleaned, err := store.CleanupStaleRunning(ctx)
 	if err != nil {
-		logger.Printf("Warning: failed to cleanup unclaimed stale jobs: %v", err)
+		logger.Warn("failed to cleanup stale jobs: %v", err)
 	}
 	if cleaned > 0 {
-		logger.Printf("Reset %d unclaimed stale running jobs to pending", cleaned)
+		logger.Info("reset %d stale jobs to pending", cleaned)
 	}
 	_ = allProcesses
 
@@ -119,7 +119,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	defer func() {
 		if err := store.UnregisterProcess(context.Background(), pid); err != nil {
-			logger.Printf("Warning: failed to unregister process: %v", err)
+			logger.Warn("failed to unregister process: %v", err)
 		}
 	}()
 
@@ -136,12 +136,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	scheduler.Start(ctx)
-	logger.Printf("Central scheduler started (PID %d)", pid)
+	logger.Banner("filehook serve (scheduler)")
+	logger.Info("PID %d", pid)
 
 	// Wait for context cancellation
 	<-ctx.Done()
 	scheduler.Stop()
 
-	logger.Println("Central scheduler stopped")
+	logger.Info("scheduler stopped")
 	return nil
 }

@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/dandriscoll/filehook/internal/config"
 	"github.com/dandriscoll/filehook/internal/debug"
+	"github.com/dandriscoll/filehook/internal/output"
 	"github.com/dandriscoll/filehook/internal/plugin"
 	"github.com/dandriscoll/filehook/internal/queue"
 	"github.com/dandriscoll/filehook/internal/watcher"
@@ -60,7 +60,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Setup logger
-	logger := log.New(os.Stdout, "[filehook] ", log.LstdFlags)
+	logger := output.NewLogger()
 
 	// Setup debug logger
 	debugLogger, err := debug.New(cfg.StateDirectory(), cfg.Debug)
@@ -70,7 +70,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	defer debugLogger.Close()
 
 	if cfg.Debug {
-		logger.Printf("Debug logging enabled: %s/debug.log", cfg.StateDirectory())
+		logger.Info("debug logging enabled: %s/debug.log", cfg.StateDirectory())
 	}
 
 	// Setup context with cancellation
@@ -82,7 +82,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		logger.Println("Shutting down...")
+		logger.Info("shutting down…")
 		cancel()
 	}()
 
@@ -105,18 +105,17 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	producerMode := schedulerProc != nil
 
 	if producerMode {
-		logger = log.New(os.Stdout, "[producer] ", log.LstdFlags)
-		logger.Printf("Scheduler detected (PID %d), running in producer mode", schedulerProc.PID)
+		logger.Banner("filehook watch (producer mode)")
+		logger.Info("scheduler detected (PID %d)", schedulerProc.PID)
 	} else {
-		logger = log.New(os.Stdout, "[legacy] ", log.LstdFlags)
-		logger.Println("No scheduler detected, running in legacy mode")
+		logger.Banner("filehook watch")
 		// Cleanup stale running jobs from previous run (only in legacy mode)
 		cleaned, err := store.CleanupStaleRunning(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to cleanup stale jobs: %w", err)
 		}
 		if cleaned > 0 {
-			logger.Printf("Reset %d stale running jobs to pending", cleaned)
+			logger.Info("reset %d stale jobs to pending", cleaned)
 		}
 	}
 
@@ -134,12 +133,12 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		StartedAt:  time.Now(),
 	}
 	if err := store.RegisterProcess(ctx, processInfo); err != nil {
-		logger.Printf("Warning: failed to register process: %v", err)
+		logger.Warn("failed to register process: %v", err)
 	}
 	defer func() {
 		// Unregister on shutdown
 		if err := store.UnregisterProcess(context.Background(), pid); err != nil {
-			logger.Printf("Warning: failed to unregister process: %v", err)
+			logger.Warn("failed to unregister process: %v", err)
 		}
 	}()
 
@@ -163,9 +162,9 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// Add watch paths (use -d directory if specified, otherwise config's watch paths)
 	for _, path := range getEffectiveWatchPaths(cfg) {
 		if watchPattern != "" {
-			logger.Printf("Watching: %s (pattern filter: %s)", path, watchPattern)
+			logger.Info("watching %s (filter: %s)", path, watchPattern)
 		} else {
-			logger.Printf("Watching: %s", path)
+			logger.Info("watching %s", path)
 		}
 		if err := w.AddPath(path); err != nil {
 			return fmt.Errorf("failed to add watch path: %w", err)
@@ -203,9 +202,9 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		}
 
 		if cfg.Concurrency.Mode == config.ConcurrencyStack {
-			logger.Printf("Started in %s mode with %d stacks defined", cfg.Concurrency.Mode, len(cfg.Stacks.Definitions))
+			logger.Info("started in %s mode with %d stacks", cfg.Concurrency.Mode, len(cfg.Stacks.Definitions))
 		} else {
-			logger.Printf("Started with %d workers in %s mode", cfg.Concurrency.MaxWorkers, cfg.Concurrency.Mode)
+			logger.Info("started with %d workers in %s mode", cfg.Concurrency.MaxWorkers, cfg.Concurrency.Mode)
 		}
 	}
 	defer func() {
@@ -217,7 +216,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	evtOpts := eventOptions{instanceID: instanceID, defaultPriority: watchDefaultPriority}
 
 	// Initial scan of existing files (like run mode)
-	logger.Println("Scanning for existing files...")
+	logger.Info("scanning for existing files…")
 
 	// Process scan events in a goroutine while scanning
 	scanDone := make(chan struct{})
@@ -231,7 +230,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 					return
 				}
 				if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger, evtOpts); err != nil {
-					logger.Printf("Error processing %s: %v", event.Path, err)
+					logger.Error("processing %s: %v", filepath.Base(event.Path), err)
 				}
 			case <-scanDone:
 				// Drain any remaining events from the scan
@@ -242,7 +241,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 							return
 						}
 						if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger, evtOpts); err != nil {
-							logger.Printf("Error processing %s: %v", event.Path, err)
+							logger.Error("processing %s: %v", filepath.Base(event.Path), err)
 						}
 					default:
 						return
@@ -255,7 +254,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}()
 
 	if err := w.ScanExisting(ctx, getEffectiveWatchPaths(cfg)); err != nil {
-		logger.Printf("Warning: scan failed: %v", err)
+		logger.Warn("scan failed: %v", err)
 	}
 	close(scanDone)
 	<-scannerStopped
@@ -263,10 +262,10 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// Get stats after scan
 	stats, err := store.GetStats(ctx)
 	if err == nil && stats.Pending > 0 {
-		logger.Printf("Found %d files to process", stats.Pending)
+		logger.Info("found %d files to process", stats.Pending)
 	}
 
-	logger.Println("Watching for changes...")
+	logger.Info("watching for changes…")
 
 	// Continue watching for new events
 	for {
@@ -276,11 +275,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 
 		case event := <-w.Events():
 			if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger, evtOpts); err != nil {
-				logger.Printf("Error processing %s: %v", event.Path, err)
+				logger.Error("processing %s: %v", filepath.Base(event.Path), err)
 			}
 
 		case err := <-w.Errors():
-			logger.Printf("Watcher error: %v", err)
+			logger.Error("watcher: %v", err)
 		}
 	}
 }
@@ -299,7 +298,7 @@ func processEvent(
 	shouldProcess *plugin.ShouldProcessChecker,
 	groupKeyGen *plugin.GroupKeyGenerator,
 	event watcher.Event,
-	logger *log.Logger,
+	logger *output.Logger,
 	debugLogger *debug.Logger,
 	opts ...eventOptions,
 ) error {
@@ -317,7 +316,7 @@ func processEvent(
 	}
 	if exists {
 		debugLogger.Decision(event.Path, "SKIP", "already queued")
-		logger.Printf("Skipping %s: already queued", event.Path)
+		logger.Skipped(event.Path, "already queued")
 		return nil
 	}
 
@@ -342,7 +341,7 @@ func processEvent(
 	// Check if file is ready for transformation (from naming plugin's "ready" field)
 	if !naming.Ready {
 		debugLogger.Decision(event.Path, "SKIP", "not ready for transformation")
-		logger.Printf("Skipping %s: not ready for transformation", event.Path)
+		logger.Skipped(event.Path, "not ready")
 		return nil
 	}
 
@@ -356,7 +355,7 @@ func processEvent(
 
 	if !shouldProc {
 		debugLogger.Decision(event.Path, "SKIP", reason)
-		logger.Printf("Skipping %s: %s", event.Path, reason)
+		logger.Skipped(event.Path, reason)
 		return nil
 	}
 
@@ -365,7 +364,7 @@ func processEvent(
 	if groupKeyGen != nil {
 		groupKey, err = groupKeyGen.Generate(ctx, event.Path)
 		if err != nil {
-			logger.Printf("Warning: group key generation failed for %s: %v", event.Path, err)
+			logger.Warn("group key generation failed for %s: %v", filepath.Base(event.Path), err)
 			// Fall through to default
 		}
 	}
@@ -417,11 +416,12 @@ func processEvent(
 	}
 
 	debugLogger.Decision(event.Path, "QUEUED", fmt.Sprintf("targetType=%s, groupKey=%s, stackName=%s, reason=%s", targetType, groupKey, stackName, reason))
-	baseName := filepath.Base(event.Path)
 	if stackName != "" {
-		logger.Printf("Queued %s (type=%s, stack=%s)", baseName, targetType, stackName)
+		logger.Queued(event.Path, fmt.Sprintf("type=%s stack=%s", targetType, stackName))
+	} else if targetType != "" {
+		logger.Queued(event.Path, fmt.Sprintf("type=%s", targetType))
 	} else {
-		logger.Printf("Queued %s (type=%s)", baseName, targetType)
+		logger.Queued(event.Path, "")
 	}
 	return nil
 }

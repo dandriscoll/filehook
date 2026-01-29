@@ -3,12 +3,12 @@ package worker
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
 	"github.com/dandriscoll/filehook/internal/config"
 	"github.com/dandriscoll/filehook/internal/debug"
+	"github.com/dandriscoll/filehook/internal/output"
 	"github.com/dandriscoll/filehook/internal/plugin"
 	"github.com/dandriscoll/filehook/internal/queue"
 )
@@ -21,11 +21,11 @@ type Pool struct {
 	workers  int
 	wg       sync.WaitGroup
 	stopCh   chan struct{}
-	logger   *log.Logger
+	logger   *output.Logger
 }
 
 // NewPool creates a new worker pool
-func NewPool(cfg *config.Config, store queue.Store, namingPlugin *plugin.NamingPlugin, debugLogger *debug.Logger, logger *log.Logger) (*Pool, error) {
+func NewPool(cfg *config.Config, store queue.Store, namingPlugin *plugin.NamingPlugin, debugLogger *debug.Logger, logger *output.Logger) (*Pool, error) {
 	executor, err := NewExecutor(cfg, namingPlugin, debugLogger)
 	if err != nil {
 		return nil, err
@@ -76,7 +76,7 @@ func (p *Pool) worker(ctx context.Context, id int) {
 		// Try to dequeue a job
 		job, err := p.store.Dequeue(ctx)
 		if err != nil {
-			p.logger.Printf("worker %d: failed to dequeue: %v", id, err)
+			p.logger.Error("dequeue failed: %v", err)
 			time.Sleep(time.Second)
 			continue
 		}
@@ -92,20 +92,20 @@ func (p *Pool) worker(ctx context.Context, id int) {
 }
 
 func (p *Pool) processJob(ctx context.Context, job *queue.Job, workerID int) {
-	p.logger.Printf("worker %d: processing %s", workerID, job.InputPath)
+	p.logger.Processing(job.InputPath)
 
 	result := p.executor.Execute(ctx, job)
 
 	if result.Error != nil || result.ExitCode != 0 {
 		if err := p.store.Fail(ctx, job.ID, result); err != nil {
-			p.logger.Printf("worker %d: failed to mark job failed: %v", workerID, err)
+			p.logger.Error("failed to mark job failed: %v", err)
 		}
-		p.logger.Printf("worker %d: job failed: %s (exit=%d)", workerID, job.InputPath, result.ExitCode)
+		p.logger.Failed(job.InputPath, result.ExitCode)
 	} else {
 		if err := p.store.Complete(ctx, job.ID, result); err != nil {
-			p.logger.Printf("worker %d: failed to mark job complete: %v", workerID, err)
+			p.logger.Error("failed to mark job complete: %v", err)
 		}
-		p.logger.Printf("worker %d: completed %s in %dms", workerID, job.InputPath, result.DurationMs)
+		p.logger.Completed(job.InputPath, result.DurationMs)
 	}
 }
 

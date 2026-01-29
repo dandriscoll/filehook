@@ -4,14 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
 	"os/exec"
-	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/dandriscoll/filehook/internal/config"
 	"github.com/dandriscoll/filehook/internal/debug"
+	"github.com/dandriscoll/filehook/internal/output"
 	"github.com/dandriscoll/filehook/internal/plugin"
 	"github.com/dandriscoll/filehook/internal/queue"
 )
@@ -27,12 +26,12 @@ type CentralScheduler struct {
 	stopCh       chan struct{}
 	wg           sync.WaitGroup
 	mu           sync.Mutex
-	logger       *log.Logger
+	logger       *output.Logger
 	debugLogger  *debug.Logger
 }
 
 // NewCentralScheduler creates a new central scheduler
-func NewCentralScheduler(cfg *config.Config, store queue.Store, namingPlugin *plugin.NamingPlugin, debugLogger *debug.Logger, logger *log.Logger, pid int) (*CentralScheduler, error) {
+func NewCentralScheduler(cfg *config.Config, store queue.Store, namingPlugin *plugin.NamingPlugin, debugLogger *debug.Logger, logger *output.Logger, pid int) (*CentralScheduler, error) {
 	executor, err := NewExecutor(cfg, namingPlugin, debugLogger)
 	if err != nil {
 		return nil, err
@@ -90,12 +89,12 @@ func (cs *CentralScheduler) run(ctx context.Context) {
 	if isStackMode {
 		state, err := cs.store.GetStackState(ctx)
 		if err != nil {
-			cs.logger.Printf("failed to get stack state: %v", err)
+			cs.logger.Error("failed to get stack state: %v", err)
 		} else if state.CurrentStack != "" {
 			cs.mu.Lock()
 			cs.currentStack = state.CurrentStack
 			cs.mu.Unlock()
-			cs.logger.Printf("restored stack: %s", state.CurrentStack)
+			cs.logger.Info("restored stack: %s", state.CurrentStack)
 		}
 	}
 
@@ -118,7 +117,7 @@ func (cs *CentralScheduler) run(ctx context.Context) {
 		}
 
 		if err != nil {
-			cs.logger.Printf("dequeue error: %v", err)
+			cs.logger.Error("dequeue error: %v", err)
 			time.Sleep(time.Second)
 			continue
 		}
@@ -194,7 +193,7 @@ func (cs *CentralScheduler) switchToStack(ctx context.Context, stackName string)
 	copy(resolved, switchCmd)
 	resolved[0] = cs.cfg.ResolvePath(resolved[0])
 
-	cs.logger.Printf("switching to %s", stackName)
+	cs.logger.StackSwitching(stackName)
 
 	start := time.Now()
 
@@ -212,35 +211,32 @@ func (cs *CentralScheduler) switchToStack(ctx context.Context, stackName string)
 	}
 
 	if storeErr := cs.store.SetCurrentStack(ctx, stackName, duration.Milliseconds()); storeErr != nil {
-		cs.logger.Printf("failed to update stack state: %v", storeErr)
+		cs.logger.Error("failed to update stack state: %v", storeErr)
 	}
 
 	cs.mu.Lock()
 	cs.currentStack = stackName
 	cs.mu.Unlock()
 
-	durSec := float64(duration.Milliseconds()) / 1000.0
-	cs.logger.Printf("switched to %s in %.1fs", stackName, durSec)
+	cs.logger.StackSwitch(stackName, duration.Milliseconds())
 	return nil
 }
 
 func (cs *CentralScheduler) executeJob(ctx context.Context, job *queue.Job) {
-	baseName := filepath.Base(job.InputPath)
-	cs.logger.Printf("processing %s", baseName)
+	cs.logger.Processing(job.InputPath)
 
 	result := cs.executor.Execute(ctx, job)
 
 	if result.Error != nil || result.ExitCode != 0 {
 		if err := cs.store.Fail(ctx, job.ID, result); err != nil {
-			cs.logger.Printf("failed to mark job failed: %v", err)
+			cs.logger.Error("failed to mark job failed: %v", err)
 		}
-		cs.logger.Printf("failed %s (exit=%d)", baseName, result.ExitCode)
+		cs.logger.Failed(job.InputPath, result.ExitCode)
 	} else {
 		if err := cs.store.Complete(ctx, job.ID, result); err != nil {
-			cs.logger.Printf("failed to mark job complete: %v", err)
+			cs.logger.Error("failed to mark job complete: %v", err)
 		}
-		durSec := float64(result.DurationMs) / 1000.0
-		cs.logger.Printf("completed %s in %.1fs", baseName, durSec)
+		cs.logger.Completed(job.InputPath, result.DurationMs)
 	}
 
 	if job.StackName != "" {

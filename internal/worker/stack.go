@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
 	"os/exec"
 	"sync"
 	"time"
 
 	"github.com/dandriscoll/filehook/internal/config"
 	"github.com/dandriscoll/filehook/internal/debug"
+	"github.com/dandriscoll/filehook/internal/output"
 	"github.com/dandriscoll/filehook/internal/plugin"
 	"github.com/dandriscoll/filehook/internal/queue"
 )
@@ -26,12 +26,12 @@ type StackScheduler struct {
 	stopCh       chan struct{}
 	wg           sync.WaitGroup
 	mu           sync.Mutex
-	logger       *log.Logger
+	logger       *output.Logger
 	debugLogger  *debug.Logger
 }
 
 // NewStackScheduler creates a new stack scheduler
-func NewStackScheduler(cfg *config.Config, store queue.Store, namingPlugin *plugin.NamingPlugin, debugLogger *debug.Logger, logger *log.Logger) (*StackScheduler, error) {
+func NewStackScheduler(cfg *config.Config, store queue.Store, namingPlugin *plugin.NamingPlugin, debugLogger *debug.Logger, logger *output.Logger) (*StackScheduler, error) {
 	executor, err := NewExecutor(cfg, namingPlugin, debugLogger)
 	if err != nil {
 		return nil, err
@@ -65,12 +65,12 @@ func (s *StackScheduler) run(ctx context.Context) {
 	// Restore current stack from database
 	state, err := s.store.GetStackState(ctx)
 	if err != nil {
-		s.logger.Printf("stack-scheduler: failed to get stack state: %v", err)
+		s.logger.Error("failed to get stack state: %v", err)
 	} else if state.CurrentStack != "" {
 		s.mu.Lock()
 		s.currentStack = state.CurrentStack
 		s.mu.Unlock()
-		s.logger.Printf("stack-scheduler: restored current stack: %s", state.CurrentStack)
+		s.logger.Info("restored stack: %s", state.CurrentStack)
 	}
 
 	for {
@@ -85,7 +85,7 @@ func (s *StackScheduler) run(ctx context.Context) {
 		// Get pending counts by stack
 		counts, err := s.store.GetPendingCountByStack(ctx)
 		if err != nil {
-			s.logger.Printf("stack-scheduler: failed to get pending counts: %v", err)
+			s.logger.Error("failed to get pending counts: %v", err)
 			time.Sleep(time.Second)
 			continue
 		}
@@ -99,7 +99,7 @@ func (s *StackScheduler) run(ctx context.Context) {
 		// Select next stack to process
 		nextStack, err := s.selectNextStack(ctx, counts)
 		if err != nil {
-			s.logger.Printf("stack-scheduler: failed to select next stack: %v", err)
+			s.logger.Error("failed to select next stack: %v", err)
 			time.Sleep(time.Second)
 			continue
 		}
@@ -117,7 +117,7 @@ func (s *StackScheduler) run(ctx context.Context) {
 
 		if currentStack != nextStack {
 			if err := s.switchToStack(ctx, nextStack); err != nil {
-				s.logger.Printf("stack-scheduler: failed to switch to stack %s: %v", nextStack, err)
+				s.logger.Error("failed to switch to stack %s: %v", nextStack, err)
 				time.Sleep(time.Second)
 				continue
 			}
@@ -126,7 +126,7 @@ func (s *StackScheduler) run(ctx context.Context) {
 		// Process one job from the current stack
 		job, err := s.store.DequeueForStack(ctx, nextStack)
 		if err != nil {
-			s.logger.Printf("stack-scheduler: failed to dequeue for stack %s: %v", nextStack, err)
+			s.logger.Error("failed to dequeue for stack %s: %v", nextStack, err)
 			time.Sleep(time.Second)
 			continue
 		}
@@ -184,7 +184,7 @@ func (s *StackScheduler) switchToStack(ctx context.Context, stackName string) er
 	copy(resolved, switchCmd)
 	resolved[0] = s.cfg.ResolvePath(resolved[0])
 
-	s.logger.Printf("stack-scheduler: switching to stack %s (running %v)", stackName, resolved)
+	s.logger.StackSwitching(stackName)
 	s.debugLogger.Log("Stack switch: %s -> %s (cmd: %v)", s.currentStack, stackName, resolved)
 
 	start := time.Now()
@@ -207,7 +207,7 @@ func (s *StackScheduler) switchToStack(ctx context.Context, stackName string) er
 
 	// Update state in database
 	if err := s.store.SetCurrentStack(ctx, stackName, durationMs); err != nil {
-		s.logger.Printf("stack-scheduler: failed to update stack state: %v", err)
+		s.logger.Error("failed to update stack state: %v", err)
 	}
 
 	// Update in-memory state
@@ -215,27 +215,27 @@ func (s *StackScheduler) switchToStack(ctx context.Context, stackName string) er
 	s.currentStack = stackName
 	s.mu.Unlock()
 
-	s.logger.Printf("stack-scheduler: switched to stack %s in %v", stackName, duration)
+	s.logger.StackSwitch(stackName, duration.Milliseconds())
 	s.debugLogger.Log("Stack switch complete: now on %s (took %v)", stackName, duration)
 
 	return nil
 }
 
 func (s *StackScheduler) processJob(ctx context.Context, job *queue.Job) {
-	s.logger.Printf("stack-scheduler: processing %s (stack=%s)", job.InputPath, job.StackName)
+	s.logger.Processing(job.InputPath)
 
 	result := s.executor.Execute(ctx, job)
 
 	if result.Error != nil || result.ExitCode != 0 {
 		if err := s.store.Fail(ctx, job.ID, result); err != nil {
-			s.logger.Printf("stack-scheduler: failed to mark job failed: %v", err)
+			s.logger.Error("failed to mark job failed: %v", err)
 		}
-		s.logger.Printf("stack-scheduler: job failed: %s (exit=%d)", job.InputPath, result.ExitCode)
+		s.logger.Failed(job.InputPath, result.ExitCode)
 	} else {
 		if err := s.store.Complete(ctx, job.ID, result); err != nil {
-			s.logger.Printf("stack-scheduler: failed to mark job complete: %v", err)
+			s.logger.Error("failed to mark job complete: %v", err)
 		}
-		s.logger.Printf("stack-scheduler: completed %s in %dms", job.InputPath, result.DurationMs)
+		s.logger.Completed(job.InputPath, result.DurationMs)
 	}
 
 	// Update stack statistics
@@ -251,12 +251,12 @@ func (s *StackScheduler) RunOnce(ctx context.Context) error {
 	// Restore current stack from database
 	state, err := s.store.GetStackState(ctx)
 	if err != nil {
-		s.logger.Printf("stack-scheduler: failed to get stack state: %v", err)
+		s.logger.Error("failed to get stack state: %v", err)
 	} else if state.CurrentStack != "" {
 		s.mu.Lock()
 		s.currentStack = state.CurrentStack
 		s.mu.Unlock()
-		s.logger.Printf("stack-scheduler: restored current stack: %s", state.CurrentStack)
+		s.logger.Info("restored stack: %s", state.CurrentStack)
 	}
 
 	for {

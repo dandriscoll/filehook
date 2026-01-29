@@ -2,12 +2,12 @@ package worker
 
 import (
 	"context"
-	"log"
 	"sync"
 	"time"
 
 	"github.com/dandriscoll/filehook/internal/config"
 	"github.com/dandriscoll/filehook/internal/debug"
+	"github.com/dandriscoll/filehook/internal/output"
 	"github.com/dandriscoll/filehook/internal/plugin"
 	"github.com/dandriscoll/filehook/internal/queue"
 )
@@ -19,7 +19,7 @@ type SequentialScheduler struct {
 	executor *Executor
 	wg       sync.WaitGroup
 	stopCh   chan struct{}
-	logger   *log.Logger
+	logger   *output.Logger
 
 	// Track current group and round-robin state
 	mu           sync.Mutex
@@ -28,7 +28,7 @@ type SequentialScheduler struct {
 }
 
 // NewSequentialScheduler creates a new sequential scheduler
-func NewSequentialScheduler(cfg *config.Config, store queue.Store, namingPlugin *plugin.NamingPlugin, debugLogger *debug.Logger, logger *log.Logger) (*SequentialScheduler, error) {
+func NewSequentialScheduler(cfg *config.Config, store queue.Store, namingPlugin *plugin.NamingPlugin, debugLogger *debug.Logger, logger *output.Logger) (*SequentialScheduler, error) {
 	executor, err := NewExecutor(cfg, namingPlugin, debugLogger)
 	if err != nil {
 		return nil, err
@@ -70,7 +70,7 @@ func (s *SequentialScheduler) run(ctx context.Context) {
 		// Get available groups
 		groups, err := s.store.GetDistinctGroups(ctx)
 		if err != nil {
-			s.logger.Printf("scheduler: failed to get groups: %v", err)
+			s.logger.Error("failed to get groups: %v", err)
 			time.Sleep(time.Second)
 			continue
 		}
@@ -79,7 +79,7 @@ func (s *SequentialScheduler) run(ctx context.Context) {
 			// No pending jobs, check for jobs without group
 			job, err := s.store.Dequeue(ctx)
 			if err != nil {
-				s.logger.Printf("scheduler: failed to dequeue: %v", err)
+				s.logger.Error("failed to dequeue: %v", err)
 				time.Sleep(time.Second)
 				continue
 			}
@@ -106,7 +106,7 @@ func (s *SequentialScheduler) run(ctx context.Context) {
 		// Get next job from this group
 		job, err := s.store.DequeueForGroup(ctx, groupKey)
 		if err != nil {
-			s.logger.Printf("scheduler: failed to dequeue for group %s: %v", groupKey, err)
+			s.logger.Error("failed to dequeue for group %s: %v", groupKey, err)
 			time.Sleep(time.Second)
 			continue
 		}
@@ -120,20 +120,20 @@ func (s *SequentialScheduler) run(ctx context.Context) {
 }
 
 func (s *SequentialScheduler) processJob(ctx context.Context, job *queue.Job) {
-	s.logger.Printf("scheduler: processing %s (group=%s)", job.InputPath, job.GroupKey)
+	s.logger.Processing(job.InputPath)
 
 	result := s.executor.Execute(ctx, job)
 
 	if result.Error != nil || result.ExitCode != 0 {
 		if err := s.store.Fail(ctx, job.ID, result); err != nil {
-			s.logger.Printf("scheduler: failed to mark job failed: %v", err)
+			s.logger.Error("failed to mark job failed: %v", err)
 		}
-		s.logger.Printf("scheduler: job failed: %s (exit=%d)", job.InputPath, result.ExitCode)
+		s.logger.Failed(job.InputPath, result.ExitCode)
 	} else {
 		if err := s.store.Complete(ctx, job.ID, result); err != nil {
-			s.logger.Printf("scheduler: failed to mark job complete: %v", err)
+			s.logger.Error("failed to mark job complete: %v", err)
 		}
-		s.logger.Printf("scheduler: completed %s in %dms", job.InputPath, result.DurationMs)
+		s.logger.Completed(job.InputPath, result.DurationMs)
 	}
 }
 

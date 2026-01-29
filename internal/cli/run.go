@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"strings"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/dandriscoll/filehook/internal/config"
 	"github.com/dandriscoll/filehook/internal/debug"
+	"github.com/dandriscoll/filehook/internal/output"
 	"github.com/dandriscoll/filehook/internal/plugin"
 	"github.com/dandriscoll/filehook/internal/queue"
 	"github.com/dandriscoll/filehook/internal/watcher"
@@ -62,7 +62,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	// Setup logger
-	logger := log.New(os.Stdout, "[filehook] ", log.LstdFlags)
+	logger := output.NewLogger()
 
 	// Setup debug logger
 	debugLogger, err := debug.New(cfg.StateDirectory(), cfg.Debug)
@@ -72,7 +72,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	defer debugLogger.Close()
 
 	if cfg.Debug {
-		logger.Printf("Debug logging enabled: %s/debug.log", cfg.StateDirectory())
+		logger.Info("debug logging enabled: %s/debug.log", cfg.StateDirectory())
 	}
 
 	// Setup context with cancellation
@@ -84,7 +84,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		logger.Println("Shutting down...")
+		logger.Info("shutting down…")
 		cancel()
 	}()
 
@@ -107,16 +107,17 @@ func runRun(cmd *cobra.Command, args []string) error {
 	producerMode := schedulerProc != nil
 
 	if producerMode {
-		logger.Printf("Scheduler detected (PID %d), running in producer mode", schedulerProc.PID)
+		logger.Banner("filehook run (producer mode)")
+		logger.Info("scheduler detected (PID %d)", schedulerProc.PID)
 	} else {
-		logger.Println("No scheduler detected, running in legacy mode")
+		logger.Banner("filehook run")
 		// Cleanup stale running jobs
 		cleaned, err := store.CleanupStaleRunning(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to cleanup stale jobs: %w", err)
 		}
 		if cleaned > 0 {
-			logger.Printf("Reset %d stale running jobs to pending", cleaned)
+			logger.Info("reset %d stale jobs to pending", cleaned)
 		}
 	}
 
@@ -134,12 +135,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 		StartedAt:  time.Now(),
 	}
 	if err := store.RegisterProcess(ctx, processInfo); err != nil {
-		logger.Printf("Warning: failed to register process: %v", err)
+		logger.Warn("failed to register process: %v", err)
 	}
 	defer func() {
 		// Unregister on shutdown
 		if err := store.UnregisterProcess(context.Background(), pid); err != nil {
-			logger.Printf("Warning: failed to unregister process: %v", err)
+			logger.Warn("failed to unregister process: %v", err)
 		}
 	}()
 
@@ -164,9 +165,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Scan existing files
 	if runPattern != "" {
-		logger.Printf("Scanning for input files matching pattern %q...", runPattern)
+		logger.Info("scanning for files matching %q…", runPattern)
 	} else {
-		logger.Println("Scanning for input files...")
+		logger.Info("scanning for files…")
 	}
 
 	evtOpts := eventOptions{instanceID: instanceID, defaultPriority: runDefaultPriority}
@@ -177,7 +178,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		defer close(eventsDone)
 		for event := range w.Events() {
 			if err := processEvent(ctx, cfg, store, namingPlugin, shouldProcess, groupKeyGen, event, logger, debugLogger, evtOpts); err != nil {
-				logger.Printf("Error processing %s: %v", event.Path, err)
+				logger.Error("processing %s: %v", event.Path, err)
 			}
 		}
 	}()
@@ -197,27 +198,27 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get stats: %w", err)
 	}
 
-	logger.Printf("Found %d pending jobs", stats.Pending)
+	logger.Info("found %d pending jobs", stats.Pending)
 
 	if stats.Pending == 0 {
-		logger.Println("No jobs to process")
+		logger.Info("no jobs to process")
 		return nil
 	}
 
 	// In producer mode, just enqueue and exit
 	if producerMode {
-		logger.Printf("Producer mode: enqueued %d jobs for scheduler to process", stats.Pending)
+		logger.Info("enqueued %d jobs for scheduler", stats.Pending)
 		return nil
 	}
 
 	// Handle --run-one mode
 	if runOne {
-		logger.Println("Processing one job (--run-one mode)...")
+		logger.Info("processing one job (--run-one)…")
 		return runOneJob(ctx, cfg, store, namingPlugin, debugLogger, logger)
 	}
 
 	// Process all jobs
-	logger.Println("Processing jobs...")
+	logger.Info("processing jobs…")
 
 	switch cfg.Concurrency.Mode {
 	case config.ConcurrencySequentialSwitch:
@@ -278,7 +279,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get final stats: %w", err)
 	}
 
-	logger.Printf("Completed: %d successful, %d failed", stats.Completed, stats.Failed)
+	logger.Info("done: %d completed, %d failed", stats.Completed, stats.Failed)
 
 	if stats.Failed > 0 {
 		return fmt.Errorf("%d jobs failed", stats.Failed)
@@ -433,7 +434,7 @@ func buildDryRunJob(
 }
 
 // runOneJob dequeues and executes a single job
-func runOneJob(ctx context.Context, cfg *config.Config, store queue.Store, namingPlugin *plugin.NamingPlugin, debugLogger *debug.Logger, logger *log.Logger) error {
+func runOneJob(ctx context.Context, cfg *config.Config, store queue.Store, namingPlugin *plugin.NamingPlugin, debugLogger *debug.Logger, logger *output.Logger) error {
 	// Create executor
 	executor, err := worker.NewExecutor(cfg, namingPlugin, debugLogger)
 	if err != nil {
@@ -446,19 +447,19 @@ func runOneJob(ctx context.Context, cfg *config.Config, store queue.Store, namin
 		return fmt.Errorf("failed to dequeue job: %w", err)
 	}
 	if job == nil {
-		logger.Println("No jobs available")
+		logger.Info("no jobs available")
 		return nil
 	}
 
-	logger.Printf("Processing: %s", job.InputPath)
+	logger.Processing(job.InputPath)
 
 	// Execute the job
 	result := executor.Execute(ctx, job)
 
 	if result.Error != nil {
-		logger.Printf("Failed: %v", result.Error)
+		logger.Failed(job.InputPath, result.ExitCode)
 		if result.Stderr != "" {
-			logger.Printf("Stderr: %s", result.Stderr)
+			logger.Error("stderr: %s", result.Stderr)
 		}
 		if err := store.Fail(ctx, job.ID, result); err != nil {
 			return fmt.Errorf("failed to mark job as failed: %w", err)
@@ -466,7 +467,7 @@ func runOneJob(ctx context.Context, cfg *config.Config, store queue.Store, namin
 		return fmt.Errorf("job failed: %w", result.Error)
 	}
 
-	logger.Printf("Completed in %dms", result.DurationMs)
+	logger.Completed(job.InputPath, result.DurationMs)
 	if err := store.Complete(ctx, job.ID, result); err != nil {
 		return fmt.Errorf("failed to mark job as complete: %w", err)
 	}
