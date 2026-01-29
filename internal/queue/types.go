@@ -49,15 +49,17 @@ type Job struct {
 
 // JobSummary is a brief representation of a job for listing
 type JobSummary struct {
-	ID         string    `json:"id"`
-	InputPath  string    `json:"input_path"`
-	Status     JobStatus `json:"status"`
-	Priority   int       `json:"priority"`
-	GroupKey   string    `json:"group_key,omitempty"`
-	StackName  string    `json:"stack_name,omitempty"`
-	InstanceID string    `json:"instance_id,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	Error      string    `json:"error,omitempty"`
+	ID          string     `json:"id"`
+	InputPath   string     `json:"input_path"`
+	Status      JobStatus  `json:"status"`
+	Priority    int        `json:"priority"`
+	GroupKey    string     `json:"group_key,omitempty"`
+	StackName   string     `json:"stack_name,omitempty"`
+	InstanceID  string     `json:"instance_id,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	DurationMs  *int64     `json:"duration_ms,omitempty"`
+	Error       string     `json:"error,omitempty"`
 }
 
 // ToSummary converts a Job to a JobSummary
@@ -69,9 +71,11 @@ func (j *Job) ToSummary() JobSummary {
 		Priority:   j.Priority,
 		GroupKey:   j.GroupKey,
 		StackName:  j.StackName,
-		InstanceID: j.InstanceID,
-		CreatedAt:  j.CreatedAt,
-		Error:      j.Error,
+		InstanceID:  j.InstanceID,
+		CreatedAt:   j.CreatedAt,
+		CompletedAt: j.CompletedAt,
+		DurationMs:  j.DurationMs,
+		Error:       j.Error,
 	}
 }
 
@@ -132,12 +136,17 @@ type ProcessInfo struct {
 
 // FullStatus holds complete status information for API consumers
 type FullStatus struct {
-	State       ProcessState  `json:"state"`
-	Process     *ProcessInfo  `json:"process,omitempty"` // Kept for backward compat
-	Scheduler   *ProcessInfo  `json:"scheduler,omitempty"`
-	Producers   []ProcessInfo `json:"producers,omitempty"`
-	Stats       *QueueStats   `json:"stats"`
-	CurrentJob  *JobSummary   `json:"current_job,omitempty"`  // Currently running job (if any)
-	NextJob     *JobSummary   `json:"next_job,omitempty"`     // Next job to be processed (if any)
-	QueueLength int           `json:"queue_length"`           // Number of pending jobs
+	State              ProcessState   `json:"state"`
+	Process            *ProcessInfo   `json:"process,omitempty"` // Kept for backward compat
+	Scheduler          *ProcessInfo   `json:"scheduler,omitempty"`
+	Producers          []ProcessInfo  `json:"producers,omitempty"`
+	Stats              *QueueStats    `json:"stats"`
+	CurrentJob         *JobSummary    `json:"current_job,omitempty"`          // Currently running job (if any)
+	NextJob            *JobSummary    `json:"next_job,omitempty"`             // Next job to be processed (if any)
+	QueueLength        int            `json:"queue_length"`                   // Number of pending jobs
+	RecentlyCompleted  []JobSummary   `json:"recently_completed,omitempty"`   // Recently completed jobs
+	RecentlyFailed     []JobSummary   `json:"recently_failed,omitempty"`      // Recently failed jobs
+	PendingJobs        []JobSummary   `json:"pending_jobs,omitempty"`         // Pending jobs (first N)
+	CurrentStack       string         `json:"current_stack,omitempty"`        // Current stack (stack mode)
+	PendingByStack     map[string]int `json:"pending_by_stack,omitempty"`     // Pending counts by stack
 }

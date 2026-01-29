@@ -355,9 +355,30 @@ func (s *SQLiteStore) ListRunning(ctx context.Context) ([]JobSummary, error) {
 	return s.listByStatus(ctx, JobStatusRunning, 0)
 }
 
+// ListRecentlyCompleted returns recently completed jobs ordered by completion time descending
+func (s *SQLiteStore) ListRecentlyCompleted(ctx context.Context, limit int) ([]JobSummary, error) {
+	query := `
+		SELECT id, input_path, status, priority, group_key, stack_name, instance_id, created_at, completed_at, duration_ms, error
+		FROM jobs
+		WHERE status = ?
+		ORDER BY completed_at DESC
+	`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, JobStatusCompleted)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanJobSummaries(rows)
+}
+
 func (s *SQLiteStore) listByStatus(ctx context.Context, status JobStatus, limit int) ([]JobSummary, error) {
 	query := `
-		SELECT id, input_path, status, priority, group_key, stack_name, instance_id, created_at, error
+		SELECT id, input_path, status, priority, group_key, stack_name, instance_id, created_at, completed_at, duration_ms, error
 		FROM jobs
 		WHERE status = ?
 		ORDER BY priority DESC, created_at ASC
@@ -380,10 +401,10 @@ func scanJobSummaries(rows *sql.Rows) ([]JobSummary, error) {
 	for rows.Next() {
 		var js JobSummary
 		var createdAt string
-		var priority sql.NullInt64
-		var groupKey, stackName, instanceID, errStr sql.NullString
+		var priority, durationMs sql.NullInt64
+		var groupKey, stackName, instanceID, completedAt, errStr sql.NullString
 
-		if err := rows.Scan(&js.ID, &js.InputPath, &js.Status, &priority, &groupKey, &stackName, &instanceID, &createdAt, &errStr); err != nil {
+		if err := rows.Scan(&js.ID, &js.InputPath, &js.Status, &priority, &groupKey, &stackName, &instanceID, &createdAt, &completedAt, &durationMs, &errStr); err != nil {
 			return nil, err
 		}
 
@@ -399,6 +420,13 @@ func scanJobSummaries(rows *sql.Rows) ([]JobSummary, error) {
 		}
 		if instanceID.Valid {
 			js.InstanceID = instanceID.String
+		}
+		if completedAt.Valid {
+			t, _ := time.Parse(time.RFC3339Nano, completedAt.String)
+			js.CompletedAt = &t
+		}
+		if durationMs.Valid {
+			js.DurationMs = &durationMs.Int64
 		}
 		if errStr.Valid {
 			js.Error = errStr.String
@@ -1146,7 +1174,7 @@ func (s *SQLiteStore) CleanupStaleRunningForPID(ctx context.Context, pid int) (i
 // ListPendingByInstance returns pending jobs filtered by instance ID
 func (s *SQLiteStore) ListPendingByInstance(ctx context.Context, instanceID string, limit int) ([]JobSummary, error) {
 	query := `
-		SELECT id, input_path, status, priority, group_key, stack_name, instance_id, created_at, error
+		SELECT id, input_path, status, priority, group_key, stack_name, instance_id, created_at, completed_at, duration_ms, error
 		FROM jobs
 		WHERE status = ? AND instance_id = ?
 		ORDER BY priority DESC, created_at ASC

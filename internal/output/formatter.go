@@ -54,9 +54,19 @@ func (f *Formatter) PrintJobSummaries(jobs []queue.JobSummary, title string) err
 
 	fmt.Fprintf(f.writer, "%s:\n", title)
 	for _, job := range jobs {
-		age := formatDuration(time.Since(job.CreatedAt))
 		shortPath := shortenPath(job.InputPath, 50)
-		line := fmt.Sprintf("  %s  %s  (%s ago)", job.ID[:8], shortPath, age)
+		var line string
+		if job.CompletedAt != nil {
+			age := FormatDuration(time.Since(*job.CompletedAt))
+			dur := ""
+			if job.DurationMs != nil {
+				dur = fmt.Sprintf(" in %s", formatMs(*job.DurationMs))
+			}
+			line = fmt.Sprintf("  %s  %s%s  (%s ago)", job.ID[:8], shortPath, dur, age)
+		} else {
+			age := FormatDuration(time.Since(job.CreatedAt))
+			line = fmt.Sprintf("  %s  %s  (%s ago)", job.ID[:8], shortPath, age)
+		}
 		if job.Priority != 0 {
 			line += fmt.Sprintf(" [priority %d]", job.Priority)
 		}
@@ -166,8 +176,20 @@ func shortenPath(path string, maxLen int) string {
 	return "..." + path[len(path)-maxLen+3:]
 }
 
-// formatDuration formats a duration for human display
-func formatDuration(d time.Duration) string {
+// formatMs formats milliseconds into a human-readable duration string
+func formatMs(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	secs := float64(ms) / 1000.0
+	if secs < 60 {
+		return fmt.Sprintf("%.1fs", secs)
+	}
+	return fmt.Sprintf("%.0fm%.0fs", secs/60, float64(int(secs)%60))
+}
+
+// FormatDuration formats a duration for human display
+func FormatDuration(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%ds", int(d.Seconds()))
 	}
@@ -243,6 +265,32 @@ func (f *Formatter) PrintFullStatus(status *queue.FullStatus) error {
 			priority = fmt.Sprintf(" (priority %d)", status.NextJob.Priority)
 		}
 		fmt.Fprintf(f.writer, "Next: %s %s%s\n", status.NextJob.ID[:8], shortenPath(status.NextJob.InputPath, 50), priority)
+	}
+
+	if status.CurrentStack != "" {
+		fmt.Fprintf(f.writer, "Stack: %s\n", status.CurrentStack)
+	}
+
+	if len(status.PendingByStack) > 0 {
+		fmt.Fprintf(f.writer, "Pending by stack:")
+		for stack, count := range status.PendingByStack {
+			label := stack
+			if label == "" {
+				label = "(none)"
+			}
+			fmt.Fprintf(f.writer, " %s=%d", label, count)
+		}
+		fmt.Fprintln(f.writer)
+	}
+
+	if len(status.RecentlyCompleted) > 0 {
+		fmt.Fprintln(f.writer)
+		f.PrintJobSummaries(status.RecentlyCompleted, "Recently completed")
+	}
+
+	if len(status.RecentlyFailed) > 0 {
+		fmt.Fprintln(f.writer)
+		f.PrintJobSummaries(status.RecentlyFailed, "Recently failed")
 	}
 
 	return nil

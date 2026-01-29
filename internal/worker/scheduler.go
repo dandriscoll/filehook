@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -89,12 +90,12 @@ func (cs *CentralScheduler) run(ctx context.Context) {
 	if isStackMode {
 		state, err := cs.store.GetStackState(ctx)
 		if err != nil {
-			cs.logger.Printf("central-scheduler: failed to get stack state: %v", err)
+			cs.logger.Printf("failed to get stack state: %v", err)
 		} else if state.CurrentStack != "" {
 			cs.mu.Lock()
 			cs.currentStack = state.CurrentStack
 			cs.mu.Unlock()
-			cs.logger.Printf("central-scheduler: restored current stack: %s", state.CurrentStack)
+			cs.logger.Printf("restored stack: %s", state.CurrentStack)
 		}
 	}
 
@@ -117,7 +118,7 @@ func (cs *CentralScheduler) run(ctx context.Context) {
 		}
 
 		if err != nil {
-			cs.logger.Printf("central-scheduler: dequeue error: %v", err)
+			cs.logger.Printf("dequeue error: %v", err)
 			time.Sleep(time.Second)
 			continue
 		}
@@ -193,7 +194,7 @@ func (cs *CentralScheduler) switchToStack(ctx context.Context, stackName string)
 	copy(resolved, switchCmd)
 	resolved[0] = cs.cfg.ResolvePath(resolved[0])
 
-	cs.logger.Printf("central-scheduler: switching to stack %s (running %v)", stackName, resolved)
+	cs.logger.Printf("switching to %s", stackName)
 
 	start := time.Now()
 
@@ -211,32 +212,35 @@ func (cs *CentralScheduler) switchToStack(ctx context.Context, stackName string)
 	}
 
 	if storeErr := cs.store.SetCurrentStack(ctx, stackName, duration.Milliseconds()); storeErr != nil {
-		cs.logger.Printf("central-scheduler: failed to update stack state: %v", storeErr)
+		cs.logger.Printf("failed to update stack state: %v", storeErr)
 	}
 
 	cs.mu.Lock()
 	cs.currentStack = stackName
 	cs.mu.Unlock()
 
-	cs.logger.Printf("central-scheduler: switched to stack %s in %v", stackName, duration)
+	durSec := float64(duration.Milliseconds()) / 1000.0
+	cs.logger.Printf("switched to %s in %.1fs", stackName, durSec)
 	return nil
 }
 
 func (cs *CentralScheduler) executeJob(ctx context.Context, job *queue.Job) {
-	cs.logger.Printf("central-scheduler: processing %s", job.InputPath)
+	baseName := filepath.Base(job.InputPath)
+	cs.logger.Printf("processing %s", baseName)
 
 	result := cs.executor.Execute(ctx, job)
 
 	if result.Error != nil || result.ExitCode != 0 {
 		if err := cs.store.Fail(ctx, job.ID, result); err != nil {
-			cs.logger.Printf("central-scheduler: failed to mark job failed: %v", err)
+			cs.logger.Printf("failed to mark job failed: %v", err)
 		}
-		cs.logger.Printf("central-scheduler: job failed: %s (exit=%d)", job.InputPath, result.ExitCode)
+		cs.logger.Printf("failed %s (exit=%d)", baseName, result.ExitCode)
 	} else {
 		if err := cs.store.Complete(ctx, job.ID, result); err != nil {
-			cs.logger.Printf("central-scheduler: failed to mark job complete: %v", err)
+			cs.logger.Printf("failed to mark job complete: %v", err)
 		}
-		cs.logger.Printf("central-scheduler: completed %s in %dms", job.InputPath, result.DurationMs)
+		durSec := float64(result.DurationMs) / 1000.0
+		cs.logger.Printf("completed %s in %.1fs", baseName, durSec)
 	}
 
 	if job.StackName != "" {

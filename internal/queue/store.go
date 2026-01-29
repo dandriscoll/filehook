@@ -43,6 +43,9 @@ type Store interface {
 	// ListRunning returns all running jobs
 	ListRunning(ctx context.Context) ([]JobSummary, error)
 
+	// ListRecentlyCompleted returns recently completed jobs ordered by completion time descending
+	ListRecentlyCompleted(ctx context.Context, limit int) ([]JobSummary, error)
+
 	// GetStats returns queue statistics
 	GetStats(ctx context.Context) (*QueueStats, error)
 

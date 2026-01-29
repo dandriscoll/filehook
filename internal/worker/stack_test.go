@@ -102,6 +102,10 @@ func (m *mockStore) ListRunning(ctx context.Context) ([]queue.JobSummary, error)
 	return nil, nil
 }
 
+func (m *mockStore) ListRecentlyCompleted(ctx context.Context, limit int) ([]queue.JobSummary, error) {
+	return nil, nil
+}
+
 func (m *mockStore) GetStats(ctx context.Context) (*queue.QueueStats, error) {
 	return &queue.QueueStats{}, nil
 }

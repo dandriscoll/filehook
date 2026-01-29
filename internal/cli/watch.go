@@ -105,8 +105,10 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	producerMode := schedulerProc != nil
 
 	if producerMode {
+		logger = log.New(os.Stdout, "[producer] ", log.LstdFlags)
 		logger.Printf("Scheduler detected (PID %d), running in producer mode", schedulerProc.PID)
 	} else {
+		logger = log.New(os.Stdout, "[legacy] ", log.LstdFlags)
 		logger.Println("No scheduler detected, running in legacy mode")
 		// Cleanup stale running jobs from previous run (only in legacy mode)
 		cleaned, err := store.CleanupStaleRunning(ctx)
@@ -414,10 +416,11 @@ func processEvent(
 	}
 
 	debugLogger.Decision(event.Path, "QUEUED", fmt.Sprintf("targetType=%s, groupKey=%s, stackName=%s, reason=%s", targetType, groupKey, stackName, reason))
+	baseName := filepath.Base(event.Path)
 	if stackName != "" {
-		logger.Printf("Queued: %s (target_type=%s, stack=%s, reason: %s)", event.Path, targetType, stackName, reason)
+		logger.Printf("Queued %s (type=%s, stack=%s)", baseName, targetType, stackName)
 	} else {
-		logger.Printf("Queued: %s (target_type=%s, reason: %s)", event.Path, targetType, reason)
+		logger.Printf("Queued %s (type=%s)", baseName, targetType)
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/dandriscoll/filehook/internal/config"
 	"github.com/dandriscoll/filehook/internal/output"
@@ -61,12 +62,33 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to initialize queue: %w", err)
 	}
 
+	formatter := output.New(isJSONOutput())
+
+	// Show processes
+	allProcesses, err := store.GetActiveProcesses(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get processes: %w", err)
+	}
+	if len(allProcesses) > 0 {
+		fmt.Println("Processes:")
+		for _, p := range allProcesses {
+			uptime := output.FormatDuration(time.Since(p.StartedAt))
+			instance := ""
+			if p.InstanceID != "" {
+				instance = fmt.Sprintf(" instance=%s", p.InstanceID)
+			}
+			fmt.Printf("  PID %d  %s (%s)%s  up %s\n", p.PID, p.Command, p.Role, instance, uptime)
+		}
+	} else {
+		fmt.Println("Processes: (none running)")
+	}
+
+	// Show stats
 	stats, err := store.GetStats(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get stats: %w", err)
 	}
-
-	formatter := output.New(isJSONOutput())
+	fmt.Println()
 	formatter.PrintStats(stats)
 
 	// Show stack information if in stack mode
@@ -84,6 +106,30 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	if len(running) > 0 {
 		fmt.Println()
 		formatter.PrintJobSummaries(running, "Running")
+	}
+
+	// Show pending jobs (first 10)
+	pending, err := store.ListPending(ctx, 10)
+	if err != nil {
+		return fmt.Errorf("failed to list pending jobs: %w", err)
+	}
+	if len(pending) > 0 {
+		fmt.Println()
+		suffix := ""
+		if stats.Pending > 10 {
+			suffix = fmt.Sprintf(" (showing 10 of %d)", stats.Pending)
+		}
+		formatter.PrintJobSummaries(pending, "Pending"+suffix)
+	}
+
+	// Show recent completions (last 5)
+	completed, err := store.ListRecentlyCompleted(ctx, 5)
+	if err != nil {
+		return fmt.Errorf("failed to list completed jobs: %w", err)
+	}
+	if len(completed) > 0 {
+		fmt.Println()
+		formatter.PrintJobSummaries(completed, "Recently completed")
 	}
 
 	// Show recent failures if any
@@ -232,6 +278,37 @@ func runState(cmd *cobra.Command, args []string) error {
 	if nextJob != nil {
 		summary := nextJob.ToSummary()
 		fullStatus.NextJob = &summary
+	}
+
+	// Recently completed jobs
+	recentlyCompleted, err := store.ListRecentlyCompleted(ctx, 5)
+	if err != nil {
+		return fmt.Errorf("failed to list recently completed: %w", err)
+	}
+	fullStatus.RecentlyCompleted = recentlyCompleted
+
+	// Recently failed jobs
+	recentlyFailed, err := store.ListFailed(ctx, 5)
+	if err != nil {
+		return fmt.Errorf("failed to list recently failed: %w", err)
+	}
+	fullStatus.RecentlyFailed = recentlyFailed
+
+	// Pending jobs
+	pendingJobs, err := store.ListPending(ctx, 10)
+	if err != nil {
+		return fmt.Errorf("failed to list pending jobs: %w", err)
+	}
+	fullStatus.PendingJobs = pendingJobs
+
+	// Stack info
+	stackState, err := store.GetStackState(ctx)
+	if err == nil && stackState.CurrentStack != "" {
+		fullStatus.CurrentStack = stackState.CurrentStack
+	}
+	pendingByStack, err := store.GetPendingCountByStack(ctx)
+	if err == nil && len(pendingByStack) > 0 {
+		fullStatus.PendingByStack = pendingByStack
 	}
 
 	// Determine the state
