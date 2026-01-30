@@ -31,10 +31,17 @@ var errorsShowCmd = &cobra.Command{
 	RunE:  runErrorsShow,
 }
 
+var errorsClearCmd = &cobra.Command{
+	Use:   "clear",
+	Short: "Delete all failed jobs from the queue",
+	RunE:  runErrorsClear,
+}
+
 func init() {
 	rootCmd.AddCommand(errorsCmd)
 	errorsCmd.AddCommand(errorsListCmd)
 	errorsCmd.AddCommand(errorsShowCmd)
+	errorsCmd.AddCommand(errorsClearCmd)
 
 	errorsListCmd.Flags().IntVarP(&errorsLimit, "limit", "l", 50, "maximum number of items to show")
 }
@@ -95,4 +102,30 @@ func runErrorsShow(cmd *cobra.Command, args []string) error {
 
 	formatter := output.New(isJSONOutput())
 	return formatter.PrintJob(job)
+}
+
+func runErrorsClear(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	store, err := queue.NewSQLiteStore(cfg.StateDirectory())
+	if err != nil {
+		return fmt.Errorf("failed to open queue: %w", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.Initialize(ctx); err != nil {
+		return fmt.Errorf("failed to initialize queue: %w", err)
+	}
+
+	count, err := store.ClearFailed(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to clear failed jobs: %w", err)
+	}
+
+	formatter := output.New(isJSONOutput())
+	return formatter.PrintMessage(fmt.Sprintf("Cleared %d failed jobs", count))
 }

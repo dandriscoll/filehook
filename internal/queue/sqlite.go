@@ -562,6 +562,16 @@ func (s *SQLiteStore) RetryAll(ctx context.Context) (int, error) {
 	return int(affected), err
 }
 
+// ClearFailed deletes all failed jobs from the queue
+func (s *SQLiteStore) ClearFailed(ctx context.Context) (int, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM jobs WHERE status = ?`, JobStatusFailed)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	return int(affected), err
+}
+
 // HasPendingOrRunning checks if a job exists for the input path
 func (s *SQLiteStore) HasPendingOrRunning(ctx context.Context, inputPath string) (bool, error) {
 	var count int
