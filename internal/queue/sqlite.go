@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,7 +27,7 @@ func NewSQLiteStore(stateDir string) (*SQLiteStore, error) {
 	}
 
 	dbPath := filepath.Join(stateDir, "queue.db")
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=30000")
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -36,6 +35,16 @@ func NewSQLiteStore(stateDir string) (*SQLiteStore, error) {
 	// Set connection pool settings
 	db.SetMaxOpenConns(1) // SQLite doesn't support multiple writers
 	db.SetMaxIdleConns(1)
+
+	// Set PRAGMAs directly — DSN parameters are unreliable with modernc.org/sqlite
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set journal_mode: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout=30000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set busy_timeout: %w", err)
+	}
 
 	return &SQLiteStore{
 		db:   db,
@@ -991,7 +1000,7 @@ func (s *SQLiteStore) GetActiveProcess(ctx context.Context) (*ProcessInfo, error
 	}
 
 	for _, info := range processes {
-		if isProcessAlive(info.PID) {
+		if isProcessAliveByHeartbeat(info) {
 			return &info, nil
 		}
 		s.db.ExecContext(ctx, "DELETE FROM process_info WHERE pid = ?", info.PID)
@@ -1000,7 +1009,9 @@ func (s *SQLiteStore) GetActiveProcess(ctx context.Context) (*ProcessInfo, error
 	return nil, nil
 }
 
-// GetActiveProcesses returns all live registered processes
+// GetActiveProcesses returns all live registered processes.
+// Liveness is determined by heartbeat recency (within 90s) rather than
+// OS-level process checks, so this works across containers sharing a database.
 func (s *SQLiteStore) GetActiveProcesses(ctx context.Context) ([]ProcessInfo, error) {
 	processes, err := s.getAllProcesses(ctx)
 	if err != nil {
@@ -1009,7 +1020,7 @@ func (s *SQLiteStore) GetActiveProcesses(ctx context.Context) ([]ProcessInfo, er
 
 	var alive []ProcessInfo
 	for _, info := range processes {
-		if isProcessAlive(info.PID) {
+		if isProcessAliveByHeartbeat(info) {
 			alive = append(alive, info)
 		} else {
 			s.db.ExecContext(ctx, "DELETE FROM process_info WHERE pid = ?", info.PID)
@@ -1028,7 +1039,7 @@ func (s *SQLiteStore) GetSchedulerProcess(ctx context.Context) (*ProcessInfo, er
 
 	for _, info := range processes {
 		if info.Role == ProcessRoleScheduler {
-			if isProcessAlive(info.PID) {
+			if isProcessAliveByHeartbeat(info) {
 				return &info, nil
 			}
 			s.db.ExecContext(ctx, "DELETE FROM process_info WHERE pid = ?", info.PID)
@@ -1278,10 +1289,17 @@ func (s *SQLiteStore) GetStatsByInstance(ctx context.Context, instanceID string)
 	return stats, rows.Err()
 }
 
-// isProcessAlive checks if a process with the given PID is still running
-func isProcessAlive(pid int) bool {
-	// On Unix systems, sending signal 0 checks if process exists without affecting it
-	// This returns nil if process exists and we have permission, error otherwise
-	err := syscall.Kill(pid, 0)
-	return err == nil
+// heartbeatTimeout is how long since the last heartbeat before a process is
+// considered dead. The heartbeat interval is 30s, so 90s allows for 2 missed beats.
+const heartbeatTimeout = 90 * time.Second
+
+// isProcessAliveByHeartbeat checks whether a process has sent a recent heartbeat.
+// This works across containers that share the same SQLite database.
+func isProcessAliveByHeartbeat(info ProcessInfo) bool {
+	if info.HeartbeatAt.IsZero() {
+		// No heartbeat recorded — fall back to started_at for processes
+		// that just registered but haven't ticked yet
+		return time.Since(info.StartedAt) < heartbeatTimeout
+	}
+	return time.Since(info.HeartbeatAt) < heartbeatTimeout
 }

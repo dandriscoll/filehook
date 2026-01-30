@@ -364,16 +364,21 @@ func TestStaleProcessCleanup(t *testing.T) {
 		t.Fatalf("failed to initialize store: %v", err)
 	}
 
-	// Register a fake dead process (PID that doesn't exist)
-	// Use a very high PID that's unlikely to exist
+	// Register a fake dead process and backdate its heartbeat so it appears stale
 	fakePID := 999999999
 	info := &ProcessInfo{
 		PID:       fakePID,
 		Command:   "dead",
-		StartedAt: time.Now(),
+		StartedAt: time.Now().Add(-5 * time.Minute),
 	}
 	if err := store.RegisterProcess(ctx, info); err != nil {
 		t.Fatalf("failed to register fake process: %v", err)
+	}
+	// Backdate the heartbeat to make it look stale
+	staleTime := time.Now().Add(-5 * time.Minute).Format(time.RFC3339Nano)
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE process_info SET heartbeat_at = ? WHERE pid = ?", staleTime, fakePID); err != nil {
+		t.Fatalf("failed to backdate heartbeat: %v", err)
 	}
 
 	// GetActiveProcess should clean up the stale entry and return nil

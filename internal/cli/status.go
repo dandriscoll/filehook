@@ -46,6 +46,11 @@ func init() {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
+	// In JSON mode, emit the same single-object output as `filehook state --json`
+	if isJSONOutput() {
+		return runState(cmd, args)
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -62,7 +67,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to initialize queue: %w", err)
 	}
 
-	formatter := output.New(isJSONOutput())
+	formatter := output.New(false)
+
+	// Get stats first so we can use them for process display
+	stats, err := store.GetStats(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get stats: %w", err)
+	}
 
 	// Show processes
 	allProcesses, err := store.GetActiveProcesses(ctx)
@@ -79,15 +90,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			}
 			fmt.Printf("  PID %d  %s (%s)%s  up %s\n", p.PID, p.Command, p.Role, instance, uptime)
 		}
+	} else if stats.Running > 0 || stats.Pending > 0 {
+		fmt.Println("Processes: (unknown, but jobs are active)")
 	} else {
 		fmt.Println("Processes: (none running)")
 	}
 
-	// Show stats
-	stats, err := store.GetStats(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get stats: %w", err)
-	}
 	fmt.Println()
 	formatter.PrintStats(stats)
 
@@ -311,11 +319,12 @@ func runState(cmd *cobra.Command, args []string) error {
 		fullStatus.PendingByStack = pendingByStack
 	}
 
-	// Determine the state
-	if processInfo == nil {
-		fullStatus.State = queue.ProcessStateNotRunning
-	} else if stats.Running > 0 || stats.Pending > 0 {
+	// Determine the state — if jobs are running or pending, a process must be
+	// active even if we can't detect it (e.g. different user, PID reuse)
+	if stats.Running > 0 || stats.Pending > 0 {
 		fullStatus.State = queue.ProcessStateProcessing
+	} else if processInfo == nil {
+		fullStatus.State = queue.ProcessStateNotRunning
 	} else {
 		fullStatus.State = queue.ProcessStateIdle
 	}

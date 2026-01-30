@@ -152,8 +152,8 @@ func (w *Watcher) handleFSEvent(event fsnotify.Event) {
 		w.mu.Unlock()
 	}
 
-	// Handle create/write events
-	if event.Has(fsnotify.Create) || event.Has(fsnotify.Write) {
+	// Handle create/write/chmod events (chmod covers touch updating mtime)
+	if event.Has(fsnotify.Create) || event.Has(fsnotify.Write) || event.Has(fsnotify.Chmod) {
 		w.debounceEvent(path, isModify, result.Pattern)
 	}
 }

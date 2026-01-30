@@ -1,6 +1,8 @@
-# `filehook state --json` Output Format
+# `filehook status --json` / `filehook state --json` Output Format
 
-Machine-readable output from `filehook state -c <config> --json`.
+Machine-readable output from `filehook status -c <config> --json` or
+`filehook state -c <config> --json`. Both commands produce the same
+single JSON object on stdout (no surrounding text).
 
 ## Top-level object: `FullStatus`
 
