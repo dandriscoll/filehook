@@ -42,6 +42,24 @@ You can also specify an absolute priority number.`,
 	RunE: runQueueMove,
 }
 
+var queueBumpCmd = &cobra.Command{
+	Use:   "bump <pattern>",
+	Short: "Bump matching pending jobs to the front of the queue",
+	Long: `Move all pending jobs whose input path matches the pattern to the front of the queue.
+
+The pattern is matched against:
+  - The full input path (exact match)
+  - The filename/basename (exact match)
+  - A file glob (matched against both full path and basename)
+
+Examples:
+  filehook queue bump myfile.txt
+  filehook queue bump /path/to/file.txt
+  filehook queue bump "*.jpg"`,
+	Args: cobra.ExactArgs(1),
+	RunE: runQueueBump,
+}
+
 var queuePriorityCmd = &cobra.Command{
 	Use:   "priority <job-id> <priority>",
 	Short: "Set the priority of a job",
@@ -54,11 +72,13 @@ func init() {
 	rootCmd.AddCommand(queueCmd)
 	queueCmd.AddCommand(queueListCmd)
 	queueCmd.AddCommand(queueMoveCmd)
+	queueCmd.AddCommand(queueBumpCmd)
 	queueCmd.AddCommand(queuePriorityCmd)
 
 	queueListCmd.Flags().IntVarP(&queueLimit, "limit", "l", 50, "maximum number of items to show")
 	queueListCmd.Flags().StringVar(&queueInstance, "instance", "", "filter by submitting instance")
 	queueMoveCmd.Flags().StringVar(&queueInstance, "instance", "", "only modify jobs from this instance")
+	queueBumpCmd.Flags().StringVar(&queueInstance, "instance", "", "filter by submitting instance")
 	queuePriorityCmd.Flags().StringVar(&queueInstance, "instance", "", "only modify jobs from this instance")
 }
 
@@ -212,4 +232,39 @@ func runQueuePriority(cmd *cobra.Command, args []string) error {
 
 	formatter := output.New(isJSONOutput())
 	return formatter.PrintMessage(fmt.Sprintf("Job %s priority set to %d", jobID[:8], priority))
+}
+
+func runQueueBump(cmd *cobra.Command, args []string) error {
+	pattern := args[0]
+
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	store, err := queue.NewSQLiteStore(cfg.StateDirectory())
+	if err != nil {
+		return fmt.Errorf("failed to open queue: %w", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.Initialize(ctx); err != nil {
+		return fmt.Errorf("failed to initialize queue: %w", err)
+	}
+
+	bumped, err := store.BumpByPattern(ctx, pattern)
+	if err != nil {
+		return fmt.Errorf("failed to bump jobs: %w", err)
+	}
+
+	formatter := output.New(isJSONOutput())
+	if len(bumped) == 0 {
+		return formatter.PrintMessage(fmt.Sprintf("No pending jobs match %q", pattern))
+	}
+
+	if err := formatter.PrintMessage(fmt.Sprintf("Bumped %d job(s) to front of queue", len(bumped))); err != nil {
+		return err
+	}
+	return formatter.PrintJobSummaries(bumped, "Bumped jobs")
 }

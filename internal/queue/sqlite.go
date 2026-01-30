@@ -1299,6 +1299,76 @@ func (s *SQLiteStore) GetStatsByInstance(ctx context.Context, instanceID string)
 	return stats, rows.Err()
 }
 
+// BumpByPattern moves all pending jobs matching the pattern to the front of the queue.
+// The pattern is matched against the full input_path, the basename, and as a filepath.Match glob.
+func (s *SQLiteStore) BumpByPattern(ctx context.Context, pattern string) ([]JobSummary, error) {
+	// Get all pending jobs
+	pending, err := s.ListPending(ctx, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find matching jobs
+	var matched []JobSummary
+	for _, js := range pending {
+		if matchesPattern(js.InputPath, pattern) {
+			matched = append(matched, js)
+		}
+	}
+
+	if len(matched) == 0 {
+		return nil, nil
+	}
+
+	// Get current max priority
+	maxPriority, err := s.GetMaxPriority(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set priorities: first match gets maxPriority+len(matched), last gets maxPriority+1
+	// This preserves relative order among bumped items while putting them all at the top
+	for i, js := range matched {
+		newPriority := maxPriority + len(matched) - i
+		_, err := s.db.ExecContext(ctx, `
+			UPDATE jobs SET priority = ? WHERE id = ? AND status = ?
+		`, newPriority, js.ID, JobStatusPending)
+		if err != nil {
+			return nil, err
+		}
+		matched[i].Priority = newPriority
+	}
+
+	return matched, nil
+}
+
+// matchesPattern checks if an input path matches the given pattern.
+func matchesPattern(inputPath, pattern string) bool {
+	// Exact full path match
+	if inputPath == pattern {
+		return true
+	}
+
+	base := filepath.Base(inputPath)
+
+	// Basename match
+	if base == pattern {
+		return true
+	}
+
+	// Glob match against full path
+	if ok, _ := filepath.Match(pattern, inputPath); ok {
+		return true
+	}
+
+	// Glob match against basename
+	if ok, _ := filepath.Match(pattern, base); ok {
+		return true
+	}
+
+	return false
+}
+
 // heartbeatTimeout is how long since the last heartbeat before a process is
 // considered dead. The heartbeat interval is 30s, so 90s allows for 2 missed beats.
 const heartbeatTimeout = 90 * time.Second
